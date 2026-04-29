@@ -29,6 +29,22 @@ inline bool shouldLog(const LogLevel level) {
          appLogLevel() != LogLevel::Silent;
 }
 
+inline const __FlashStringHelper *logLevelName(const LogLevel level) {
+  switch (level) {
+    case LogLevel::Debug:
+      return F("debug");
+    case LogLevel::Info:
+      return F("info");
+    case LogLevel::Warn:
+      return F("warn");
+    case LogLevel::Error:
+      return F("error");
+    case LogLevel::Silent:
+      return F("silent");
+  }
+  return F("unknown");
+}
+
 #define LOG_PRINT(level, value) \
   do { \
     if (shouldLog(level)) { \

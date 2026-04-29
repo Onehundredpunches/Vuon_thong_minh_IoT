@@ -1,6 +1,5 @@
 #include <Arduino.h>
 #include <Wire.h>
-#include <ctype.h>
 
 #include "config.h"
 #include "sensor_types.h"
@@ -12,13 +11,11 @@
 #include "lcd_display.h"
 #include "actuator_manager.h"
 #include "sensor_manager.h"
+#include "serial_cli.h"
 
 namespace {
 
 static constexpr bool ENABLE_BOOT_SELF_TEST = true;
-
-char g_serialCmdBuf[48] = {0};
-size_t g_serialCmdLen = 0;
 
 uint32_t g_nextSampleMs = 0;
 uint32_t g_sampleIndex = 0;
@@ -59,62 +56,7 @@ void scanI2cBus() {
   Serial.println();
 }
 
-void printHelp() {
-  Serial.println(F("Commands:"));
-  Serial.println(F("  help"));
-  Serial.println(F("  servo on"));
-  Serial.println(F("  servo off"));
-  Serial.println(F("  servo sweep on"));
-  Serial.println(F("  servo sweep off"));
-  Serial.println(F("  servo stop"));
-  Serial.println(F("  servo 0"));
-  Serial.println(F("  servo 90"));
-  Serial.println(F("  servo 180"));
-  Serial.println(F("  light on"));
-  Serial.println(F("  light off"));
-  Serial.println(F("  light toggle"));
-  Serial.println(F("  light blink"));
-  Serial.println(F("  fan on"));
-  Serial.println(F("  fan off"));
-  Serial.println(F("  pump on"));
-  Serial.println(F("  pump off"));
-}
-
 void processSerialCommand(char *cmd) {
-  // Normalize whitespace and lower-case input so commands are robust to spacing/line ending variations.
-  size_t writeIdx = 0;
-  bool prevSpace = true;
-  for (size_t i = 0; cmd[i] != '\0'; ++i) {
-    char c = cmd[i];
-    if (c == '\t') {
-      c = ' ';
-    }
-    c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
-
-    if (c == ' ') {
-      if (!prevSpace) {
-        cmd[writeIdx++] = ' ';
-      }
-      prevSpace = true;
-      continue;
-    }
-
-    cmd[writeIdx++] = c;
-    prevSpace = false;
-  }
-  if (writeIdx > 0 && cmd[writeIdx - 1] == ' ') {
-    --writeIdx;
-  }
-  cmd[writeIdx] = '\0';
-
-  if (writeIdx == 0) {
-    return;
-  }
-
-  if (strcmp(cmd, "help") == 0) {
-    printHelp();
-    return;
-  }
   if (strcmp(cmd, "servo off") == 0) {
     ActuatorManager::setServoOnOff(false);
     ActuatorManager::printServoAck(cmd);
@@ -239,26 +181,6 @@ void processSerialCommand(char *cmd) {
   }
 
   Serial.println(F("CMD: UNKNOWN"));
-}
-
-void handleSerialCommands() {
-  while (Serial.available() > 0) {
-    const char c = static_cast<char>(Serial.read());
-    if (c == '\r' || c == '\n') {
-      g_serialCmdBuf[g_serialCmdLen] = '\0';
-      if (g_serialCmdLen > 0) {
-        processSerialCommand(g_serialCmdBuf);
-      }
-      g_serialCmdLen = 0;
-      g_serialCmdBuf[0] = '\0';
-      continue;
-    }
-
-    if (g_serialCmdLen < (sizeof(g_serialCmdBuf) - 1)) {
-      g_serialCmdBuf[g_serialCmdLen++] = c;
-      g_serialCmdBuf[g_serialCmdLen] = '\0';
-    }
-  }
 }
 
 void executeCommandForTest(const char *cmd) {
@@ -426,15 +348,16 @@ void setup() {
 
   initLcdIfPresent();
   ActuatorManager::initServoControl();
+  SerialCLI::begin(processSerialCommand);
   runSelfTests();
-  printHelp();
+  SerialCLI::printHelp();
 
   g_nextSampleMs = millis();
 }
 
 void loop() {
   const uint32_t now = millis();
-  handleSerialCommands();
+  SerialCLI::tick();
   ActuatorManager::updateServoSweep(now);
   ActuatorManager::updateLightBlink(now);
   ActuatorManager::tickSafety(now);
