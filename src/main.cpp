@@ -15,6 +15,7 @@
 #include "self_test.h"
 #include "command_handler.h"
 #include "mode_controller.h"
+#include "auto_logic.h"
 
 namespace {
 
@@ -69,6 +70,7 @@ void setup() {
   SensorManager::begin();
   ActuatorManager::begin();
   ModeController::begin(millis());
+  AutoLogic::begin(millis());
 
   printStartup();
   ActuatorManager::printLightState();
@@ -104,6 +106,7 @@ void loop() {
   g_nextSampleMs += LOOP_INTERVAL_MS;
 
   SensorData data = SensorManager::read(g_sampleIndex);
+  AutoLogic::tick(now, data);
 
   SensorManager::printCompactBlock(data);
   LcdDisplayState lcdState{};
@@ -112,7 +115,7 @@ void loop() {
   lcdState.mode = ModeController::mode();
   lcdState.wifiOk = false;
   lcdState.mqttOk = false;
-  lcdState.controlOwner = (ModeController::mode() == SystemMode::Auto) ? "AUTO" : "BE";
+  lcdState.controlOwner = AutoLogic::controlOwner();
   updateLcd(now, lcdState);
 
   ++g_sampleIndex;

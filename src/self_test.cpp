@@ -3,6 +3,7 @@
 #include <Arduino.h>
 
 #include "actuator_manager.h"
+#include "auto_logic.h"
 #include "command_handler.h"
 #include "config.h"
 #include "lcd_display.h"
@@ -25,6 +26,7 @@ bool g_sensorPolicySelfTestPass = false;
 bool g_commandHandlerSelfTestPass = false;
 bool g_modeFsmSelfTestPass = false;
 bool g_lcdFormatterSelfTestPass = false;
+bool g_autoLogicSelfTestPass = false;
 
 bool reportTestStep(const char *group, const char *step, const bool pass) {
   Serial.print(group);
@@ -152,6 +154,7 @@ bool run(const CommandExecutor executeCommand) {
   g_sensorPolicySelfTestPass = SensorManager::runPolicySelfTest();
   g_commandHandlerSelfTestPass = CommandHandler::runParserSelfTest();
   g_modeFsmSelfTestPass = ModeController::runSelfTest();
+  g_autoLogicSelfTestPass = AutoLogic::runSelfTest();
   g_lcdFormatterSelfTestPass = runLcdFormatterSelfTest();
   Serial.print(F("LCD_DEVICE_SELF_TEST: "));
   Serial.println(lcdDeviceAvailable() ? F("READY") : F("NOT_READY"));
@@ -161,7 +164,7 @@ bool run(const CommandExecutor executeCommand) {
   const bool allPass = g_pinMapSelfTestPass && g_relaySelfTestPass && g_servoSelfTestPass &&
                        g_actuatorSafetySelfTestPass && g_sensorPolicySelfTestPass &&
                        g_commandHandlerSelfTestPass && g_modeFsmSelfTestPass &&
-                       g_lcdFormatterSelfTestPass;
+                       g_autoLogicSelfTestPass && g_lcdFormatterSelfTestPass;
   Serial.print(F("SELF_TEST: "));
   Serial.println(allPass ? F("PASS") : F("FAIL"));
   return allPass;
