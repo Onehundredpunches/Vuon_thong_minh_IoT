@@ -13,6 +13,7 @@
 #include "system_mode.h"
 #include "pins_validate.h"
 #include "log_config.h"
+#include "simulator.h"
 
 namespace {
 
@@ -61,20 +62,6 @@ bool g_fanSelfTestPass = false;
 bool g_pumpSelfTestPass = false;
 bool g_servoSelfTestPass = false;
 bool g_pinMapSelfTestPass = false;
-
-float clampf(const float value, const float lo, const float hi) {
-  return value < lo ? lo : (value > hi ? hi : value);
-}
-
-uint16_t toAdcRaw(const float value) {
-  if (value <= 0.0f) {
-    return 0;
-  }
-  if (value >= static_cast<float>(ADC_MAX)) {
-    return ADC_MAX;
-  }
-  return static_cast<uint16_t>(value + 0.5f);
-}
 
 float adcToVoltage(const uint16_t raw) {
   return (static_cast<float>(raw) * ADC_REF_VOLTAGE) / static_cast<float>(ADC_MAX);
@@ -741,30 +728,6 @@ void updateLcd(const SensorData &d) {
   g_lcd->print(line2);
 }
 
-void readSimulator(SensorData &d) {
-  const float t = static_cast<float>(g_sampleIndex) * 0.35f;
-
-  d.temperatureC = 29.0f + 5.0f * sinf(t);
-  d.temperatureC = clampf(d.temperatureC, 24.0f, 34.0f);
-
-  d.humidityPct = 65.0f + 20.0f * sinf(t * 0.73f + 0.8f);
-  d.humidityPct = clampf(d.humidityPct, 45.0f, 85.0f);
-
-  d.lux = 10000.0f + 10000.0f * sinf(t * 0.41f + 1.1f);
-  d.lux = clampf(d.lux, 0.0f, 20000.0f);
-
-  const float soilWave = 2200.0f + 1400.0f * sinf(t * 0.52f + 0.4f);
-  const float rainWave = 1800.0f + 1700.0f * sinf(t * 0.67f + 2.1f);
-  d.soilAO = toAdcRaw(clampf(soilWave, 0.0f, static_cast<float>(ADC_MAX)));
-  d.rainAO = toAdcRaw(clampf(rainWave, 0.0f, static_cast<float>(ADC_MAX)));
-
-  d.soilDO = (d.soilAO >= SOIL_DO_THRESHOLD_AO) ? 1 : 0;
-  d.rainDO = (d.rainAO >= RAIN_DO_THRESHOLD_AO) ? 1 : 0;
-
-  d.dhtOk = true;
-  d.bh1750Ok = true;
-}
-
 void readHardware(SensorData &d) {
   const float humidity = g_dht.readHumidity();
   const float temperatureC = g_dht.readTemperature();
@@ -900,7 +863,7 @@ void loop() {
 
   SensorData data{};
 #if APP_MODE_SIMULATOR
-  readSimulator(data);
+  readSimulator(data, g_sampleIndex);
 #else
   readHardware(data);
 #endif
