@@ -3,6 +3,7 @@
 #include <Arduino.h>
 
 #include "actuator_manager.h"
+#include "command_handler.h"
 #include "config.h"
 #include "sensor_manager.h"
 
@@ -19,6 +20,7 @@ bool g_servoSelfTestPass = false;
 bool g_pinMapSelfTestPass = false;
 bool g_actuatorSafetySelfTestPass = false;
 bool g_sensorPolicySelfTestPass = false;
+bool g_commandHandlerSelfTestPass = false;
 
 bool reportTestStep(const char *group, const char *step, const bool pass) {
   Serial.print(group);
@@ -144,11 +146,13 @@ bool run(const CommandExecutor executeCommand) {
   ActuatorManager::setSelfTestMode(false);
   g_actuatorSafetySelfTestPass = ActuatorManager::runSafetySelfTest();
   g_sensorPolicySelfTestPass = SensorManager::runPolicySelfTest();
+  g_commandHandlerSelfTestPass = CommandHandler::runParserSelfTest();
 
   ActuatorManager::restoreSafeDefaults();
 
   const bool allPass = g_pinMapSelfTestPass && g_relaySelfTestPass && g_servoSelfTestPass &&
-                       g_actuatorSafetySelfTestPass && g_sensorPolicySelfTestPass;
+                       g_actuatorSafetySelfTestPass && g_sensorPolicySelfTestPass &&
+                       g_commandHandlerSelfTestPass;
   Serial.print(F("SELF_TEST: "));
   Serial.println(allPass ? F("PASS") : F("FAIL"));
   return allPass;

@@ -13,6 +13,7 @@
 #include "sensor_manager.h"
 #include "serial_cli.h"
 #include "self_test.h"
+#include "command_handler.h"
 
 namespace {
 
@@ -47,139 +48,6 @@ void scanI2cBus() {
   Serial.println();
 }
 
-void processSerialCommand(char *cmd) {
-  if (strcmp(cmd, "servo off") == 0) {
-    ActuatorManager::setServoOnOff(false);
-    ActuatorManager::printServoAck(cmd);
-    return;
-  }
-  if (strcmp(cmd, "servo on") == 0) {
-    ActuatorManager::setServoOnOff(true);
-    ActuatorManager::printServoAck(cmd);
-    return;
-  }
-  if (strcmp(cmd, "servo sweep on") == 0) {
-    const ActuatorCommandStatus status = ActuatorManager::requestServoSweep(true, millis());
-    if (status != ActuatorCommandStatus::Ok) {
-      ActuatorManager::printCommandReject(cmd, status);
-      return;
-    }
-    ActuatorManager::printServoAck(cmd);
-    return;
-  }
-  if (strcmp(cmd, "servo sweep off") == 0 || strcmp(cmd, "servo stop") == 0) {
-    const ActuatorCommandStatus status = ActuatorManager::requestServoSweep(false, millis());
-    if (status != ActuatorCommandStatus::Ok) {
-      ActuatorManager::printCommandReject(cmd, status);
-      return;
-    }
-    ActuatorManager::printServoAck(cmd);
-    return;
-  }
-
-  int targetAngle = -1;
-  if (sscanf(cmd, "servo %d", &targetAngle) == 1 &&
-      (targetAngle == 0 || targetAngle == 90 || targetAngle == 180)) {
-    const ActuatorCommandStatus status = ActuatorManager::requestServoAngleCommand(targetAngle, millis());
-    if (status != ActuatorCommandStatus::Ok) {
-      ActuatorManager::printCommandReject(cmd, status);
-      return;
-    }
-    ActuatorManager::printServoAck(cmd);
-    return;
-  }
-
-  if (strcmp(cmd, "light on") == 0) {
-    const ActuatorCommandStatus status = ActuatorManager::requestLight(true, millis());
-    if (status != ActuatorCommandStatus::Ok) {
-      ActuatorManager::printCommandReject(cmd, status);
-      return;
-    }
-    ActuatorManager::printRelayCommandLog(cmd, "LIGHT", PIN_RELAY_LIGHT, true);
-    ActuatorManager::printLightState();
-    return;
-  }
-  if (strcmp(cmd, "light off") == 0) {
-    const ActuatorCommandStatus status = ActuatorManager::requestLight(false, millis());
-    if (status != ActuatorCommandStatus::Ok) {
-      ActuatorManager::printCommandReject(cmd, status);
-      return;
-    }
-    ActuatorManager::printRelayCommandLog(cmd, "LIGHT", PIN_RELAY_LIGHT, false);
-    ActuatorManager::printLightState();
-    return;
-  }
-  if (strcmp(cmd, "light toggle") == 0) {
-    const bool targetOn = !ActuatorManager::lightOn();
-    const ActuatorCommandStatus status = ActuatorManager::requestLight(targetOn, millis());
-    if (status != ActuatorCommandStatus::Ok) {
-      ActuatorManager::printCommandReject(cmd, status);
-      return;
-    }
-    ActuatorManager::printRelayCommandLog(cmd, "LIGHT", PIN_RELAY_LIGHT, targetOn);
-    ActuatorManager::printLightState();
-    return;
-  }
-  if (strcmp(cmd, "light blink") == 0) {
-    const ActuatorCommandStatus status = ActuatorManager::requestLightBlink(millis());
-    if (status != ActuatorCommandStatus::Ok) {
-      ActuatorManager::printCommandReject(cmd, status);
-      return;
-    }
-    ActuatorManager::printRelayCommandLog(cmd, "LIGHT", PIN_RELAY_LIGHT, true);
-    ActuatorManager::printLightState();
-    return;
-  }
-  if (strcmp(cmd, "fan on") == 0) {
-    const ActuatorCommandStatus status = ActuatorManager::requestFan(true, millis());
-    if (status != ActuatorCommandStatus::Ok) {
-      ActuatorManager::printCommandReject(cmd, status);
-      return;
-    }
-    ActuatorManager::printRelayCommandLog(cmd, "FAN", PIN_RELAY_FAN, true);
-    ActuatorManager::printFanState();
-    return;
-  }
-  if (strcmp(cmd, "fan off") == 0) {
-    const ActuatorCommandStatus status = ActuatorManager::requestFan(false, millis());
-    if (status != ActuatorCommandStatus::Ok) {
-      ActuatorManager::printCommandReject(cmd, status);
-      return;
-    }
-    ActuatorManager::printRelayCommandLog(cmd, "FAN", PIN_RELAY_FAN, false);
-    ActuatorManager::printFanState();
-    return;
-  }
-  if (strcmp(cmd, "pump on") == 0) {
-    const ActuatorCommandStatus status = ActuatorManager::requestPump(true, millis());
-    if (status != ActuatorCommandStatus::Ok) {
-      ActuatorManager::printCommandReject(cmd, status);
-      return;
-    }
-    ActuatorManager::printRelayCommandLog(cmd, "PUMP", PIN_RELAY_PUMP, true);
-    ActuatorManager::printPumpState();
-    return;
-  }
-  if (strcmp(cmd, "pump off") == 0) {
-    const ActuatorCommandStatus status = ActuatorManager::requestPump(false, millis());
-    if (status != ActuatorCommandStatus::Ok) {
-      ActuatorManager::printCommandReject(cmd, status);
-      return;
-    }
-    ActuatorManager::printRelayCommandLog(cmd, "PUMP", PIN_RELAY_PUMP, false);
-    ActuatorManager::printPumpState();
-    return;
-  }
-
-  Serial.println(F("CMD: UNKNOWN"));
-}
-
-void executeCommandForTest(const char *cmd) {
-  char local[48] = {0};
-  strncpy(local, cmd, sizeof(local) - 1);
-  processSerialCommand(local);
-}
-
 void printStartup() {
 #if APP_MODE_SIMULATOR
   Serial.println(F("MODE: SIMULATOR"));
@@ -208,8 +76,8 @@ void setup() {
 
   initLcdIfPresent();
   ActuatorManager::initServoControl();
-  SerialCLI::begin(processSerialCommand);
-  SelfTest::run(executeCommandForTest);
+  SerialCLI::begin(CommandHandler::handle);
+  SelfTest::run(CommandHandler::executeForTest);
   SerialCLI::printHelp();
 
   g_nextSampleMs = millis();
