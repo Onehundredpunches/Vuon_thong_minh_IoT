@@ -138,6 +138,8 @@ void printHelp() {
   Serial.println(F("  log info"));
   Serial.println(F("  log warn"));
   Serial.println(F("  log error"));
+  Serial.println(F("  mode auto"));
+  Serial.println(F("  mode manual"));
   Serial.println(F("  servo on"));
   Serial.println(F("  servo off"));
   Serial.println(F("  servo sweep on"));

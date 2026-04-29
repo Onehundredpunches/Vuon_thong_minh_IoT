@@ -5,6 +5,8 @@
 #include "actuator_manager.h"
 #include "command_handler.h"
 #include "config.h"
+#include "lcd_display.h"
+#include "mode_controller.h"
 #include "sensor_manager.h"
 
 namespace SelfTest {
@@ -21,6 +23,8 @@ bool g_pinMapSelfTestPass = false;
 bool g_actuatorSafetySelfTestPass = false;
 bool g_sensorPolicySelfTestPass = false;
 bool g_commandHandlerSelfTestPass = false;
+bool g_modeFsmSelfTestPass = false;
+bool g_lcdFormatterSelfTestPass = false;
 
 bool reportTestStep(const char *group, const char *step, const bool pass) {
   Serial.print(group);
@@ -147,12 +151,17 @@ bool run(const CommandExecutor executeCommand) {
   g_actuatorSafetySelfTestPass = ActuatorManager::runSafetySelfTest();
   g_sensorPolicySelfTestPass = SensorManager::runPolicySelfTest();
   g_commandHandlerSelfTestPass = CommandHandler::runParserSelfTest();
+  g_modeFsmSelfTestPass = ModeController::runSelfTest();
+  g_lcdFormatterSelfTestPass = runLcdFormatterSelfTest();
+  Serial.print(F("LCD_DEVICE_SELF_TEST: "));
+  Serial.println(lcdDeviceAvailable() ? F("READY") : F("NOT_READY"));
 
   ActuatorManager::restoreSafeDefaults();
 
   const bool allPass = g_pinMapSelfTestPass && g_relaySelfTestPass && g_servoSelfTestPass &&
                        g_actuatorSafetySelfTestPass && g_sensorPolicySelfTestPass &&
-                       g_commandHandlerSelfTestPass;
+                       g_commandHandlerSelfTestPass && g_modeFsmSelfTestPass &&
+                       g_lcdFormatterSelfTestPass;
   Serial.print(F("SELF_TEST: "));
   Serial.println(allPass ? F("PASS") : F("FAIL"));
   return allPass;

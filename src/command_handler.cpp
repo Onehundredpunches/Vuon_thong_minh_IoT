@@ -7,6 +7,7 @@
 
 #include "actuator_manager.h"
 #include "config.h"
+#include "mode_controller.h"
 
 namespace CommandHandler {
 namespace {
@@ -25,6 +26,8 @@ enum class CommandKind : uint8_t {
   FanOff,
   PumpOn,
   PumpOff,
+  SetModeAuto,
+  SetModeManual,
   Unknown
 };
 
@@ -104,6 +107,12 @@ ParsedCommand parseCommand(const char *cmd) {
   if (strcmp(cmd, "pump off") == 0) {
     return {CommandKind::PumpOff, -1};
   }
+  if (strcmp(cmd, "mode auto") == 0 || strcmp(cmd, "set_mode auto") == 0) {
+    return {CommandKind::SetModeAuto, -1};
+  }
+  if (strcmp(cmd, "mode manual") == 0 || strcmp(cmd, "set_mode manual") == 0) {
+    return {CommandKind::SetModeManual, -1};
+  }
 
   return {CommandKind::Unknown, -1};
 }
@@ -118,13 +127,58 @@ bool expectKind(const char *input, const CommandKind expectedKind, const int exp
 
 }  // namespace
 
-void handle(char *cmd) {
+bool isActuatorCommand(const CommandKind kind) {
+  return kind != CommandKind::SetModeAuto && kind != CommandKind::SetModeManual &&
+         kind != CommandKind::Unknown;
+}
+
+void printModeAck(const char *cmd) {
+  Serial.print(F("ACK "));
+  Serial.print(cmd);
+  Serial.print(F(" | MODE="));
+  Serial.println(ModeController::modeName());
+}
+
+void printModeReject(const char *cmd, const char *reason) {
+  Serial.print(F("REJECT "));
+  Serial.print(cmd);
+  Serial.print(F(" | "));
+  Serial.println(reason);
+}
+
+void handleInternal(char *cmd, const bool bypassModeGate) {
   normalize(cmd);
   if (cmd[0] == '\0') {
     return;
   }
 
   const ParsedCommand parsed = parseCommand(cmd);
+  if (parsed.kind == CommandKind::SetModeManual) {
+    if (!ModeController::setManual("serial", millis())) {
+      printModeReject(cmd, "invalid_transition");
+      return;
+    }
+    printModeAck(cmd);
+    return;
+  }
+  if (parsed.kind == CommandKind::SetModeAuto) {
+    if (!ModeController::setAuto("serial", millis())) {
+      printModeReject(cmd, "invalid_transition");
+      return;
+    }
+    printModeAck(cmd);
+    return;
+  }
+
+  if (!bypassModeGate && isActuatorCommand(parsed.kind)) {
+    const char *rejectReason = nullptr;
+    if (!ModeController::actuatorCommandAllowed(&rejectReason)) {
+      printModeReject(cmd, rejectReason);
+      return;
+    }
+    ModeController::noteManualActivity(millis());
+  }
+
   switch (parsed.kind) {
     case CommandKind::ServoOff:
       ActuatorManager::setServoOnOff(false);
@@ -248,10 +302,14 @@ void handle(char *cmd) {
   }
 }
 
+void handle(char *cmd) {
+  handleInternal(cmd, false);
+}
+
 void executeForTest(const char *cmd) {
   char local[48] = {0};
   strncpy(local, cmd, sizeof(local) - 1);
-  handle(local);
+  handleInternal(local, true);
 }
 
 bool runParserSelfTest() {
@@ -261,6 +319,8 @@ bool runParserSelfTest() {
   pass &= expectKind("pump on", CommandKind::PumpOn);
   pass &= expectKind("servo 90", CommandKind::ServoAngle, 90);
   pass &= expectKind("servo stop", CommandKind::ServoSweepOff);
+  pass &= expectKind("mode manual", CommandKind::SetModeManual);
+  pass &= expectKind("set_mode auto", CommandKind::SetModeAuto);
   pass &= expectKind("servo 45", CommandKind::Unknown);
 
   Serial.print(F("COMMAND_HANDLER_SELF_TEST: "));

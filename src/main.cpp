@@ -14,6 +14,7 @@
 #include "serial_cli.h"
 #include "self_test.h"
 #include "command_handler.h"
+#include "mode_controller.h"
 
 namespace {
 
@@ -67,6 +68,7 @@ void setup() {
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
   SensorManager::begin();
   ActuatorManager::begin();
+  ModeController::begin(millis());
 
   printStartup();
   ActuatorManager::printLightState();
@@ -77,7 +79,12 @@ void setup() {
   initLcdIfPresent();
   ActuatorManager::initServoControl();
   SerialCLI::begin(CommandHandler::handle);
-  SelfTest::run(CommandHandler::executeForTest);
+  const bool selfTestPass = SelfTest::run(CommandHandler::executeForTest);
+  if (selfTestPass) {
+    ModeController::setAuto("self_test_pass", millis());
+  } else {
+    ModeController::enterError("self_test_fail", millis());
+  }
   SerialCLI::printHelp();
 
   g_nextSampleMs = millis();
@@ -89,6 +96,7 @@ void loop() {
   ActuatorManager::updateServoSweep(now);
   ActuatorManager::updateLightBlink(now);
   ActuatorManager::tickSafety(now);
+  ModeController::tick(millis());
 
   if (static_cast<int32_t>(now - g_nextSampleMs) < 0) {
     return;
@@ -98,7 +106,14 @@ void loop() {
   SensorData data = SensorManager::read(g_sampleIndex);
 
   SensorManager::printCompactBlock(data);
-  updateLcd(data);
+  LcdDisplayState lcdState{};
+  lcdState.sensors = data;
+  lcdState.actuators = ActuatorManager::snapshot();
+  lcdState.mode = ModeController::mode();
+  lcdState.wifiOk = false;
+  lcdState.mqttOk = false;
+  lcdState.controlOwner = (ModeController::mode() == SystemMode::Auto) ? "AUTO" : "BE";
+  updateLcd(now, lcdState);
 
   ++g_sampleIndex;
 }
