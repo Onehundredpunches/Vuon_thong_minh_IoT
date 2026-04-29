@@ -12,21 +12,12 @@
 #include "actuator_manager.h"
 #include "sensor_manager.h"
 #include "serial_cli.h"
+#include "self_test.h"
 
 namespace {
 
-static constexpr bool ENABLE_BOOT_SELF_TEST = true;
-
 uint32_t g_nextSampleMs = 0;
 uint32_t g_sampleIndex = 0;
-bool g_relaySelfTestPass = false;
-bool g_lightSelfTestPass = false;
-bool g_fanSelfTestPass = false;
-bool g_pumpSelfTestPass = false;
-bool g_servoSelfTestPass = false;
-bool g_pinMapSelfTestPass = false;
-bool g_actuatorSafetySelfTestPass = false;
-bool g_sensorPolicySelfTestPass = false;
 
 bool probeI2cAddress(const uint8_t addr) {
   Wire.beginTransmission(addr);
@@ -189,137 +180,6 @@ void executeCommandForTest(const char *cmd) {
   processSerialCommand(local);
 }
 
-bool reportTestStep(const char *group, const char *step, const bool pass) {
-  Serial.print(group);
-  Serial.print(F(" "));
-  Serial.print(step);
-  Serial.print(F(": "));
-  Serial.println(pass ? F("PASS") : F("FAIL"));
-  return pass;
-}
-
-void runRelaySelfTest() {
-  bool allPass = true;
-  ActuatorManager::stopLightBlink();
-  ActuatorManager::setRelayLight(false);
-  g_lightSelfTestPass = reportTestStep("LIGHT_TEST", "boot_off", !ActuatorManager::lightOn());
-  allPass &= g_lightSelfTestPass;
-
-  executeCommandForTest("light on");
-  g_lightSelfTestPass &= reportTestStep("LIGHT_TEST", "light_on", ActuatorManager::lightOn());
-  allPass &= g_lightSelfTestPass;
-
-  executeCommandForTest("light off");
-  g_lightSelfTestPass &= reportTestStep("LIGHT_TEST", "light_off", !ActuatorManager::lightOn());
-  allPass &= g_lightSelfTestPass;
-
-  executeCommandForTest("light toggle");
-  g_lightSelfTestPass &= reportTestStep("LIGHT_TEST", "toggle_on", ActuatorManager::lightOn());
-  allPass &= g_lightSelfTestPass;
-
-  executeCommandForTest("light toggle");
-  g_lightSelfTestPass &= reportTestStep("LIGHT_TEST", "toggle_off", !ActuatorManager::lightOn());
-  allPass &= g_lightSelfTestPass;
-
-  executeCommandForTest("light blink");
-  ActuatorManager::completeLightBlinkForTest();
-  g_lightSelfTestPass &= reportTestStep("LIGHT_TEST", "blink_complete_off",
-                                        !ActuatorManager::lightBlinkActive() && !ActuatorManager::lightOn());
-  allPass &= g_lightSelfTestPass;
-
-  ActuatorManager::setRelayFan(false);
-  g_fanSelfTestPass = reportTestStep("FAN_TEST", "boot_off", !ActuatorManager::fanOn());
-  executeCommandForTest("fan on");
-  g_fanSelfTestPass &= reportTestStep("FAN_TEST", "fan_on", ActuatorManager::fanOn());
-  executeCommandForTest("fan off");
-  g_fanSelfTestPass &= reportTestStep("FAN_TEST", "fan_off", !ActuatorManager::fanOn());
-  allPass &= g_fanSelfTestPass;
-
-  ActuatorManager::setRelayPump(false);
-  g_pumpSelfTestPass = reportTestStep("PUMP_TEST", "boot_off", !ActuatorManager::pumpOn());
-  executeCommandForTest("pump on");
-  g_pumpSelfTestPass &= reportTestStep("PUMP_TEST", "pump_on", ActuatorManager::pumpOn());
-  executeCommandForTest("pump off");
-  g_pumpSelfTestPass &= reportTestStep("PUMP_TEST", "pump_off", !ActuatorManager::pumpOn());
-  allPass &= g_pumpSelfTestPass;
-
-  Serial.print(F("LIGHT_SELF_TEST: "));
-  Serial.println(g_lightSelfTestPass ? F("PASS") : F("FAIL"));
-  Serial.print(F("FAN_SELF_TEST: "));
-  Serial.println(g_fanSelfTestPass ? F("PASS") : F("FAIL"));
-  Serial.print(F("PUMP_SELF_TEST: "));
-  Serial.println(g_pumpSelfTestPass ? F("PASS") : F("FAIL"));
-
-  g_relaySelfTestPass = allPass;
-  Serial.print(F("RELAY_SELF_TEST: "));
-  Serial.println(allPass ? F("PASS") : F("FAIL"));
-}
-
-void runServoSelfTest() {
-  bool allPass = true;
-
-  executeCommandForTest("servo on");
-  allPass &= reportTestStep("SERVO_TEST", "servo_on", ActuatorManager::servoEnabled());
-
-  executeCommandForTest("servo sweep on");
-  allPass &= reportTestStep("SERVO_TEST", "sweep_on",
-                            ActuatorManager::servoEnabled() && ActuatorManager::servoSweepEnabled());
-
-  executeCommandForTest("servo sweep off");
-  allPass &= reportTestStep("SERVO_TEST", "sweep_off", !ActuatorManager::servoSweepEnabled());
-
-  executeCommandForTest("servo 180");
-  allPass &= reportTestStep("SERVO_TEST", "angle_180",
-                            ActuatorManager::servoAngle() == 180 && !ActuatorManager::servoSweepEnabled());
-
-  executeCommandForTest("servo off");
-  allPass &= reportTestStep("SERVO_TEST", "servo_off",
-                            !ActuatorManager::servoEnabled() && ActuatorManager::servoDetachedOrSelfTest());
-
-  g_servoSelfTestPass = allPass;
-  Serial.print(F("SERVO_SELF_TEST: "));
-  Serial.println(g_servoSelfTestPass ? F("PASS") : F("FAIL"));
-}
-
-void runPinMapSelfTest() {
-  const bool pass =
-      PIN_I2C_SDA == 21 &&
-      PIN_I2C_SCL == 22 &&
-      PIN_DHT22_DATA == 27 &&
-      PIN_SOIL_AO == 34 &&
-      PIN_SOIL_DO == 26 &&
-      PIN_RAIN_AO == 35 &&
-      PIN_RAIN_DO == 25 &&
-      PIN_SERVO_ROOF == 19 &&
-      PIN_RELAY_LIGHT == 18 &&
-      PIN_RELAY_FAN == 17 &&
-      PIN_RELAY_PUMP == 16;
-
-  g_pinMapSelfTestPass = reportTestStep("PINMAP_TEST", "schematic_a3", pass);
-}
-
-void runSelfTests() {
-  if (!ENABLE_BOOT_SELF_TEST) {
-    return;
-  }
-  Serial.println(F("SELF_TEST: START"));
-  ActuatorManager::setSelfTestMode(true);
-  runPinMapSelfTest();
-  runRelaySelfTest();
-  runServoSelfTest();
-  ActuatorManager::setSelfTestMode(false);
-  g_actuatorSafetySelfTestPass = ActuatorManager::runSafetySelfTest();
-  g_sensorPolicySelfTestPass = SensorManager::runPolicySelfTest();
-
-  // Restore safe default runtime states after tests.
-  ActuatorManager::restoreSafeDefaults();
-
-  const bool allPass = g_pinMapSelfTestPass && g_relaySelfTestPass && g_servoSelfTestPass &&
-                       g_actuatorSafetySelfTestPass && g_sensorPolicySelfTestPass;
-  Serial.print(F("SELF_TEST: "));
-  Serial.println(allPass ? F("PASS") : F("FAIL"));
-}
-
 void printStartup() {
 #if APP_MODE_SIMULATOR
   Serial.println(F("MODE: SIMULATOR"));
@@ -349,7 +209,7 @@ void setup() {
   initLcdIfPresent();
   ActuatorManager::initServoControl();
   SerialCLI::begin(processSerialCommand);
-  runSelfTests();
+  SelfTest::run(executeCommandForTest);
   SerialCLI::printHelp();
 
   g_nextSampleMs = millis();
