@@ -25,7 +25,7 @@ bool probeI2cAddress(const uint8_t addr) {
 }
 
 void buildLcdLine1(const SensorData &data, char *out, const size_t outSize) {
-  if (data.dhtOk) {
+  if (data.dht_ok) {
     snprintf(out, outSize, "T:%4.1fC H:%3.0f%%", data.temperatureC, data.humidityPct);
   } else {
     snprintf(out, outSize, "T:ERR H:ERR");
@@ -33,8 +33,8 @@ void buildLcdLine1(const SensorData &data, char *out, const size_t outSize) {
 }
 
 void buildLcdLine2Sensor(const SensorData &data, char *out, const size_t outSize) {
-  const int luxInt = data.bh1750Ok ? static_cast<int>(data.lux + 0.5f) : -1;
-  if (data.bh1750Ok) {
+  const int luxInt = data.bh1750_ok ? static_cast<int>(data.lux + 0.5f) : -1;
+  if (data.bh1750_ok) {
     snprintf(out, outSize, "Lux:%6d lx", luxInt);
   } else {
     snprintf(out, outSize, "Lux:ERR");

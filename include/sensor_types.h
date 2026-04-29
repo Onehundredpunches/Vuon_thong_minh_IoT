@@ -11,8 +11,10 @@ struct SensorData {
   uint16_t rainAO;
   uint8_t soilDO;
   uint8_t rainDO;
-  bool dhtOk;
-  bool bh1750Ok;
+  bool dht_ok;
+  bool bh1750_ok;
+  bool soil_ok;
+  bool rain_ok;
 };
 
 #endif

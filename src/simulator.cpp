@@ -42,6 +42,8 @@ void readSimulator(SensorData &data, const uint32_t sampleIndex) {
   data.soilDO = (data.soilAO >= SOIL_DO_THRESHOLD_AO) ? 1 : 0;
   data.rainDO = (data.rainAO >= RAIN_DO_THRESHOLD_AO) ? 1 : 0;
 
-  data.dhtOk = true;
-  data.bh1750Ok = true;
+  data.dht_ok = true;
+  data.bh1750_ok = true;
+  data.soil_ok = true;
+  data.rain_ok = true;
 }

@@ -1,8 +1,5 @@
 #include <Arduino.h>
 #include <Wire.h>
-#include <DHT.h>
-#include <BH1750.h>
-#include <math.h>
 #include <ctype.h>
 
 #include "config.h"
@@ -14,11 +11,9 @@
 #include "simulator.h"
 #include "lcd_display.h"
 #include "actuator_manager.h"
+#include "sensor_manager.h"
 
 namespace {
-
-DHT g_dht(PIN_DHT22_DATA, DHT22);
-BH1750 g_bh1750;
 
 static constexpr bool ENABLE_BOOT_SELF_TEST = true;
 
@@ -34,10 +29,6 @@ bool g_pumpSelfTestPass = false;
 bool g_servoSelfTestPass = false;
 bool g_pinMapSelfTestPass = false;
 bool g_actuatorSafetySelfTestPass = false;
-
-float adcToVoltage(const uint16_t raw) {
-  return (static_cast<float>(raw) * ADC_REF_VOLTAGE) / static_cast<float>(ADC_MAX);
-}
 
 bool probeI2cAddress(const uint8_t addr) {
   Wire.beginTransmission(addr);
@@ -405,73 +396,6 @@ void runSelfTests() {
   Serial.println(allPass ? F("PASS") : F("FAIL"));
 }
 
-void readHardware(SensorData &d) {
-  const float humidity = g_dht.readHumidity();
-  const float temperatureC = g_dht.readTemperature();
-  d.dhtOk = !(isnan(humidity) || isnan(temperatureC));
-  if (d.dhtOk) {
-    d.humidityPct = humidity;
-    d.temperatureC = temperatureC;
-  }
-
-  const float lux = g_bh1750.readLightLevel();
-  d.bh1750Ok = (lux >= 0.0f && !isnan(lux));
-  if (d.bh1750Ok) {
-    d.lux = lux;
-  }
-
-  d.soilAO = analogRead(PIN_SOIL_AO);
-  d.rainAO = analogRead(PIN_RAIN_AO);
-  d.soilDO = static_cast<uint8_t>(digitalRead(PIN_SOIL_DO));
-  d.rainDO = static_cast<uint8_t>(digitalRead(PIN_RAIN_DO));
-}
-
-void printCompactBlock(const SensorData &d) {
-  const float soilV = adcToVoltage(d.soilAO);
-  const float rainV = adcToVoltage(d.rainAO);
-
-  Serial.print(F("DATA Temp:"));
-  if (d.dhtOk) {
-    Serial.print(d.temperatureC, 1);
-    Serial.print(F("C"));
-  } else {
-    Serial.print(F("DHT_ERR"));
-  }
-
-  Serial.print(F(" Hum:"));
-  if (d.dhtOk) {
-    Serial.print(d.humidityPct, 1);
-    Serial.print(F("%RH"));
-  } else {
-    Serial.print(F("DHT_ERR"));
-  }
-
-  Serial.print(F(" Lux:"));
-  if (d.bh1750Ok) {
-    Serial.print(d.lux, 1);
-    Serial.print(F("lx"));
-  } else {
-    Serial.print(F("BH1750_ERR"));
-  }
-
-  Serial.print(F(" SoilAO:"));
-  Serial.print(d.soilAO);
-  Serial.print(F("("));
-  Serial.print(soilV, 3);
-  Serial.print(F("V)"));
-
-  Serial.print(F(" RainAO:"));
-  Serial.print(d.rainAO);
-  Serial.print(F("("));
-  Serial.print(rainV, 3);
-  Serial.print(F("V)"));
-
-  Serial.print(F(" SoilDO:"));
-  Serial.print(d.soilDO);
-  Serial.print(F(" RainDO:"));
-  Serial.println(d.rainDO);
-}
-
 void printStartup() {
 #if APP_MODE_SIMULATOR
   Serial.println(F("MODE: SIMULATOR"));
@@ -488,30 +412,15 @@ void setup() {
   Serial.begin(SERIAL_BAUD);
   delay(300);
 
-  pinMode(PIN_DHT22_DATA, INPUT_PULLUP);
-  pinMode(PIN_SOIL_AO, INPUT);
-  pinMode(PIN_RAIN_AO, INPUT);
-  pinMode(PIN_SOIL_DO, INPUT);
-  pinMode(PIN_RAIN_DO, INPUT);
-  ActuatorManager::begin();
-
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
+  SensorManager::begin();
+  ActuatorManager::begin();
 
   printStartup();
   ActuatorManager::printLightState();
   ActuatorManager::printFanState();
   ActuatorManager::printPumpState();
   scanI2cBus();
-
-#if APP_MODE_SIMULATOR
-  // Simulator mode intentionally avoids real sensor init/read calls.
-#else
-  g_dht.begin();
-  const bool bh1750Ok = g_bh1750.begin();
-  if (!bh1750Ok) {
-    Serial.println(F("BH1750_ERR"));
-  }
-#endif
 
   initLcdIfPresent();
   ActuatorManager::initServoControl();
@@ -533,14 +442,9 @@ void loop() {
   }
   g_nextSampleMs += LOOP_INTERVAL_MS;
 
-  SensorData data{};
-#if APP_MODE_SIMULATOR
-  readSimulator(data, g_sampleIndex);
-#else
-  readHardware(data);
-#endif
+  SensorData data = SensorManager::read(g_sampleIndex);
 
-  printCompactBlock(data);
+  SensorManager::printCompactBlock(data);
   updateLcd(data);
 
   ++g_sampleIndex;
