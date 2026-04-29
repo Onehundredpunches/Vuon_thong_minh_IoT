@@ -17,6 +17,11 @@ static constexpr int SERVO_STEP_DEG = 2;
 static constexpr uint32_t SERVO_STEP_INTERVAL_MS = 20;
 static constexpr uint8_t LIGHT_BLINK_COUNT = 5;
 static constexpr uint32_t LIGHT_BLINK_INTERVAL_MS = 200;
+static constexpr uint32_t PUMP_MAX_ON_MS = 300000;
+static constexpr uint32_t PUMP_COOLDOWN_MS = 60000;
+static constexpr uint32_t FAN_MAX_ON_MS = 1800000;
+static constexpr uint32_t FAN_COOLDOWN_MS = 10000;
+static constexpr uint32_t LIGHT_COOLDOWN_MS = 5000;
 
 bool g_selfTestMode = false;
 bool g_servoEnabled = true;
@@ -30,6 +35,12 @@ bool g_pumpOn = false;
 bool g_lightBlinkActive = false;
 uint8_t g_lightBlinkTransitionsRemaining = 0;
 uint32_t g_nextLightBlinkMs = 0;
+uint32_t g_lightCooldownUntilMs = 0;
+uint32_t g_fanOnSinceMs = 0;
+uint32_t g_fanCooldownUntilMs = 0;
+uint32_t g_pumpOnSinceMs = 0;
+uint32_t g_pumpCooldownUntilMs = 0;
+bool g_roofOpenInterlock = false;
 
 bool attachServoIfNeeded() {
 #if APP_MODE_SIMULATOR
@@ -77,6 +88,19 @@ void printRelayState(const char *name, const bool on) {
   Serial.println(on ? F("ON") : F("OFF"));
 }
 
+bool cooldownActive(const uint32_t nowMs, const uint32_t cooldownUntilMs) {
+  return static_cast<int32_t>(nowMs - cooldownUntilMs) < 0;
+}
+
+bool roofOpenAngle(const int angle) {
+  return angle > 0;
+}
+
+bool elapsedAtLeast(const uint32_t nowMs, const uint32_t sinceMs, const uint32_t durationMs) {
+  const int32_t elapsedMs = static_cast<int32_t>(nowMs - sinceMs);
+  return elapsedMs >= 0 && static_cast<uint32_t>(elapsedMs) >= durationMs;
+}
+
 }  // namespace
 
 void begin() {
@@ -101,16 +125,31 @@ void printRelayActiveLevel() {
 void setRelayLight(const bool on) {
   g_lightOn = on;
   writeRelayPin(PIN_RELAY_LIGHT, on);
+  if (!on) {
+    stopLightBlink();
+  }
 }
 
 void setRelayFan(const bool on) {
+  const uint32_t nowMs = millis();
   g_fanOn = on;
   writeRelayPin(PIN_RELAY_FAN, on);
+  if (on) {
+    g_fanOnSinceMs = nowMs;
+  } else {
+    g_fanOnSinceMs = 0;
+  }
 }
 
 void setRelayPump(const bool on) {
+  const uint32_t nowMs = millis();
   g_pumpOn = on;
   writeRelayPin(PIN_RELAY_PUMP, on);
+  if (on) {
+    g_pumpOnSinceMs = nowMs;
+  } else {
+    g_pumpOnSinceMs = 0;
+  }
 }
 
 void printLightState() {
@@ -220,6 +259,25 @@ void printServoAck(const char *cmd) {
   Serial.println(g_servoEnabled ? F("=PWM") : F("=DETACHED"));
 }
 
+const __FlashStringHelper *statusReason(const ActuatorCommandStatus status) {
+  switch (status) {
+    case ActuatorCommandStatus::Ok:
+      return F("success");
+    case ActuatorCommandStatus::CooldownActive:
+      return F("cooldown_active");
+    case ActuatorCommandStatus::InterlockViolation:
+      return F("interlock_violation");
+  }
+  return F("internal_error");
+}
+
+void printCommandReject(const char *cmd, const ActuatorCommandStatus status) {
+  Serial.print(F("REJECT "));
+  Serial.print(cmd);
+  Serial.print(F(" | "));
+  Serial.println(statusReason(status));
+}
+
 void setServoSweep(const bool enabled) {
   g_servoSweepEnabled = enabled;
   if (!g_servoSweepEnabled) {
@@ -239,6 +297,86 @@ void setServoAngleCommand(const int angle) {
   g_servoAngle = constrain(angle, SERVO_MIN_ANGLE, SERVO_MAX_ANGLE);
   g_servoSweepEnabled = false;
   writeServoAngle();
+}
+
+ActuatorCommandStatus requestLight(const bool on, const uint32_t nowMs) {
+  if (!g_selfTestMode && on && cooldownActive(nowMs, g_lightCooldownUntilMs)) {
+    return ActuatorCommandStatus::CooldownActive;
+  }
+  if (!g_selfTestMode && !on) {
+    g_lightCooldownUntilMs = nowMs + LIGHT_COOLDOWN_MS;
+  }
+  stopLightBlink();
+  setRelayLight(on);
+  return ActuatorCommandStatus::Ok;
+}
+
+ActuatorCommandStatus requestLightBlink(const uint32_t nowMs) {
+  if (!g_selfTestMode && cooldownActive(nowMs, g_lightCooldownUntilMs)) {
+    return ActuatorCommandStatus::CooldownActive;
+  }
+  stopLightBlink();
+  setRelayLight(true);
+  g_lightBlinkActive = true;
+  g_lightBlinkTransitionsRemaining = (LIGHT_BLINK_COUNT * 2) - 1;
+  g_nextLightBlinkMs = millis() + LIGHT_BLINK_INTERVAL_MS;
+  return ActuatorCommandStatus::Ok;
+}
+
+ActuatorCommandStatus requestFan(const bool on, const uint32_t nowMs) {
+  if (!g_selfTestMode && on && cooldownActive(nowMs, g_fanCooldownUntilMs)) {
+    return ActuatorCommandStatus::CooldownActive;
+  }
+  if (on) {
+    g_fanOnSinceMs = nowMs;
+  } else if (!g_selfTestMode && g_fanOn) {
+    g_fanCooldownUntilMs = nowMs + FAN_COOLDOWN_MS;
+    g_fanOnSinceMs = 0;
+  } else if (!on) {
+    g_fanOnSinceMs = 0;
+  }
+  g_fanOn = on;
+  writeRelayPin(PIN_RELAY_FAN, on);
+  return ActuatorCommandStatus::Ok;
+}
+
+ActuatorCommandStatus requestPump(const bool on, const uint32_t nowMs) {
+  if (!g_selfTestMode && on && cooldownActive(nowMs, g_pumpCooldownUntilMs)) {
+    return ActuatorCommandStatus::CooldownActive;
+  }
+  if (on) {
+    g_pumpOnSinceMs = nowMs;
+  } else if (!g_selfTestMode && g_pumpOn) {
+    g_pumpCooldownUntilMs = nowMs + PUMP_COOLDOWN_MS;
+    g_pumpOnSinceMs = 0;
+  } else if (!on) {
+    g_pumpOnSinceMs = 0;
+  }
+  g_pumpOn = on;
+  writeRelayPin(PIN_RELAY_PUMP, on);
+  return ActuatorCommandStatus::Ok;
+}
+
+ActuatorCommandStatus requestServoSweep(const bool enabled, const uint32_t nowMs) {
+  (void)nowMs;
+  if (enabled && g_roofOpenInterlock) {
+    return ActuatorCommandStatus::InterlockViolation;
+  }
+  setServoSweep(enabled);
+  return ActuatorCommandStatus::Ok;
+}
+
+ActuatorCommandStatus requestServoAngleCommand(const int angle, const uint32_t nowMs) {
+  (void)nowMs;
+  if (g_roofOpenInterlock && roofOpenAngle(angle)) {
+    return ActuatorCommandStatus::InterlockViolation;
+  }
+  setServoAngleCommand(angle);
+  return ActuatorCommandStatus::Ok;
+}
+
+void setRoofOpenInterlock(const bool active) {
+  g_roofOpenInterlock = active;
 }
 
 void initServoControl() {
@@ -290,15 +428,76 @@ void updateServoSweep(const uint32_t nowMs) {
 
 void restoreSafeDefaults() {
   stopLightBlink();
-  setRelayLight(false);
-  setRelayFan(false);
-  setRelayPump(false);
+  g_lightOn = false;
+  g_fanOn = false;
+  g_pumpOn = false;
+  writeRelayPin(PIN_RELAY_LIGHT, false);
+  writeRelayPin(PIN_RELAY_FAN, false);
+  writeRelayPin(PIN_RELAY_PUMP, false);
+  g_lightCooldownUntilMs = 0;
+  g_fanOnSinceMs = 0;
+  g_fanCooldownUntilMs = 0;
+  g_pumpOnSinceMs = 0;
+  g_pumpCooldownUntilMs = 0;
+  g_roofOpenInterlock = false;
   g_servoEnabled = true;
   g_servoSweepEnabled = false;
   g_servoAngle = SERVO_MIN_ANGLE;
   g_servoDirection = 1;
   attachServoIfNeeded();
   writeServoAngle();
+}
+
+void tickSafety(const uint32_t nowMs) {
+  if (g_pumpOn && g_pumpOnSinceMs > 0 && elapsedAtLeast(nowMs, g_pumpOnSinceMs, PUMP_MAX_ON_MS)) {
+    g_pumpOn = false;
+    g_pumpOnSinceMs = 0;
+    g_pumpCooldownUntilMs = nowMs + PUMP_COOLDOWN_MS;
+    writeRelayPin(PIN_RELAY_PUMP, false);
+    Serial.println(F("SAFETY pump timeout | PUMP=OFF cooldown_active"));
+  }
+
+  if (g_fanOn && g_fanOnSinceMs > 0 && elapsedAtLeast(nowMs, g_fanOnSinceMs, FAN_MAX_ON_MS)) {
+    g_fanOn = false;
+    g_fanOnSinceMs = 0;
+    g_fanCooldownUntilMs = nowMs + FAN_COOLDOWN_MS;
+    writeRelayPin(PIN_RELAY_FAN, false);
+    Serial.println(F("SAFETY fan timeout | FAN=OFF cooldown_active"));
+  }
+}
+
+bool runSafetySelfTest() {
+  bool allPass = true;
+
+  restoreSafeDefaults();
+  const uint32_t t0 = 100000;
+
+  allPass &= (requestPump(true, t0) == ActuatorCommandStatus::Ok);
+  tickSafety(t0 + PUMP_MAX_ON_MS + 1);
+  allPass &= !g_pumpOn;
+  allPass &= (requestPump(true, t0 + PUMP_MAX_ON_MS + 2) == ActuatorCommandStatus::CooldownActive);
+
+  restoreSafeDefaults();
+  allPass &= (requestFan(true, t0) == ActuatorCommandStatus::Ok);
+  tickSafety(t0 + FAN_MAX_ON_MS + 1);
+  allPass &= !g_fanOn;
+  allPass &= (requestFan(true, t0 + FAN_MAX_ON_MS + 2) == ActuatorCommandStatus::CooldownActive);
+
+  restoreSafeDefaults();
+  allPass &= (requestLight(true, t0) == ActuatorCommandStatus::Ok);
+  allPass &= (requestLight(false, t0 + 10) == ActuatorCommandStatus::Ok);
+  allPass &= (requestLight(true, t0 + 20) == ActuatorCommandStatus::CooldownActive);
+
+  restoreSafeDefaults();
+  setRoofOpenInterlock(true);
+  allPass &= (requestServoAngleCommand(90, t0) == ActuatorCommandStatus::InterlockViolation);
+  allPass &= (requestServoAngleCommand(0, t0) == ActuatorCommandStatus::Ok);
+  setRoofOpenInterlock(false);
+
+  restoreSafeDefaults();
+  Serial.print(F("ACTUATOR_SAFETY_SELF_TEST: "));
+  Serial.println(allPass ? F("PASS") : F("FAIL"));
+  return allPass;
 }
 
 bool lightOn() {

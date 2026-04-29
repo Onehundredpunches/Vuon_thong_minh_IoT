@@ -33,6 +33,7 @@ bool g_fanSelfTestPass = false;
 bool g_pumpSelfTestPass = false;
 bool g_servoSelfTestPass = false;
 bool g_pinMapSelfTestPass = false;
+bool g_actuatorSafetySelfTestPass = false;
 
 float adcToVoltage(const uint16_t raw) {
   return (static_cast<float>(raw) * ADC_REF_VOLTAGE) / static_cast<float>(ADC_MAX);
@@ -133,12 +134,20 @@ void processSerialCommand(char *cmd) {
     return;
   }
   if (strcmp(cmd, "servo sweep on") == 0) {
-    ActuatorManager::setServoSweep(true);
+    const ActuatorCommandStatus status = ActuatorManager::requestServoSweep(true, millis());
+    if (status != ActuatorCommandStatus::Ok) {
+      ActuatorManager::printCommandReject(cmd, status);
+      return;
+    }
     ActuatorManager::printServoAck(cmd);
     return;
   }
   if (strcmp(cmd, "servo sweep off") == 0 || strcmp(cmd, "servo stop") == 0) {
-    ActuatorManager::setServoSweep(false);
+    const ActuatorCommandStatus status = ActuatorManager::requestServoSweep(false, millis());
+    if (status != ActuatorCommandStatus::Ok) {
+      ActuatorManager::printCommandReject(cmd, status);
+      return;
+    }
     ActuatorManager::printServoAck(cmd);
     return;
   }
@@ -146,58 +155,93 @@ void processSerialCommand(char *cmd) {
   int targetAngle = -1;
   if (sscanf(cmd, "servo %d", &targetAngle) == 1 &&
       (targetAngle == 0 || targetAngle == 90 || targetAngle == 180)) {
-    ActuatorManager::setServoAngleCommand(targetAngle);
+    const ActuatorCommandStatus status = ActuatorManager::requestServoAngleCommand(targetAngle, millis());
+    if (status != ActuatorCommandStatus::Ok) {
+      ActuatorManager::printCommandReject(cmd, status);
+      return;
+    }
     ActuatorManager::printServoAck(cmd);
     return;
   }
 
   if (strcmp(cmd, "light on") == 0) {
+    const ActuatorCommandStatus status = ActuatorManager::requestLight(true, millis());
+    if (status != ActuatorCommandStatus::Ok) {
+      ActuatorManager::printCommandReject(cmd, status);
+      return;
+    }
     ActuatorManager::printRelayCommandLog(cmd, "LIGHT", PIN_RELAY_LIGHT, true);
-    ActuatorManager::stopLightBlink();
-    ActuatorManager::setRelayLight(true);
     ActuatorManager::printLightState();
     return;
   }
   if (strcmp(cmd, "light off") == 0) {
+    const ActuatorCommandStatus status = ActuatorManager::requestLight(false, millis());
+    if (status != ActuatorCommandStatus::Ok) {
+      ActuatorManager::printCommandReject(cmd, status);
+      return;
+    }
     ActuatorManager::printRelayCommandLog(cmd, "LIGHT", PIN_RELAY_LIGHT, false);
-    ActuatorManager::stopLightBlink();
-    ActuatorManager::setRelayLight(false);
     ActuatorManager::printLightState();
     return;
   }
   if (strcmp(cmd, "light toggle") == 0) {
-    ActuatorManager::printRelayCommandLog(cmd, "LIGHT", PIN_RELAY_LIGHT, !ActuatorManager::lightOn());
-    ActuatorManager::stopLightBlink();
-    ActuatorManager::setRelayLight(!ActuatorManager::lightOn());
+    const bool targetOn = !ActuatorManager::lightOn();
+    const ActuatorCommandStatus status = ActuatorManager::requestLight(targetOn, millis());
+    if (status != ActuatorCommandStatus::Ok) {
+      ActuatorManager::printCommandReject(cmd, status);
+      return;
+    }
+    ActuatorManager::printRelayCommandLog(cmd, "LIGHT", PIN_RELAY_LIGHT, targetOn);
     ActuatorManager::printLightState();
     return;
   }
   if (strcmp(cmd, "light blink") == 0) {
+    const ActuatorCommandStatus status = ActuatorManager::requestLightBlink(millis());
+    if (status != ActuatorCommandStatus::Ok) {
+      ActuatorManager::printCommandReject(cmd, status);
+      return;
+    }
     ActuatorManager::printRelayCommandLog(cmd, "LIGHT", PIN_RELAY_LIGHT, true);
-    ActuatorManager::startLightBlink();
+    ActuatorManager::printLightState();
     return;
   }
   if (strcmp(cmd, "fan on") == 0) {
+    const ActuatorCommandStatus status = ActuatorManager::requestFan(true, millis());
+    if (status != ActuatorCommandStatus::Ok) {
+      ActuatorManager::printCommandReject(cmd, status);
+      return;
+    }
     ActuatorManager::printRelayCommandLog(cmd, "FAN", PIN_RELAY_FAN, true);
-    ActuatorManager::setRelayFan(true);
     ActuatorManager::printFanState();
     return;
   }
   if (strcmp(cmd, "fan off") == 0) {
+    const ActuatorCommandStatus status = ActuatorManager::requestFan(false, millis());
+    if (status != ActuatorCommandStatus::Ok) {
+      ActuatorManager::printCommandReject(cmd, status);
+      return;
+    }
     ActuatorManager::printRelayCommandLog(cmd, "FAN", PIN_RELAY_FAN, false);
-    ActuatorManager::setRelayFan(false);
     ActuatorManager::printFanState();
     return;
   }
   if (strcmp(cmd, "pump on") == 0) {
+    const ActuatorCommandStatus status = ActuatorManager::requestPump(true, millis());
+    if (status != ActuatorCommandStatus::Ok) {
+      ActuatorManager::printCommandReject(cmd, status);
+      return;
+    }
     ActuatorManager::printRelayCommandLog(cmd, "PUMP", PIN_RELAY_PUMP, true);
-    ActuatorManager::setRelayPump(true);
     ActuatorManager::printPumpState();
     return;
   }
   if (strcmp(cmd, "pump off") == 0) {
+    const ActuatorCommandStatus status = ActuatorManager::requestPump(false, millis());
+    if (status != ActuatorCommandStatus::Ok) {
+      ActuatorManager::printCommandReject(cmd, status);
+      return;
+    }
     ActuatorManager::printRelayCommandLog(cmd, "PUMP", PIN_RELAY_PUMP, false);
-    ActuatorManager::setRelayPump(false);
     ActuatorManager::printPumpState();
     return;
   }
@@ -350,11 +394,13 @@ void runSelfTests() {
   runRelaySelfTest();
   runServoSelfTest();
   ActuatorManager::setSelfTestMode(false);
+  g_actuatorSafetySelfTestPass = ActuatorManager::runSafetySelfTest();
 
   // Restore safe default runtime states after tests.
   ActuatorManager::restoreSafeDefaults();
 
-  const bool allPass = g_pinMapSelfTestPass && g_relaySelfTestPass && g_servoSelfTestPass;
+  const bool allPass = g_pinMapSelfTestPass && g_relaySelfTestPass && g_servoSelfTestPass &&
+                       g_actuatorSafetySelfTestPass;
   Serial.print(F("SELF_TEST: "));
   Serial.println(allPass ? F("PASS") : F("FAIL"));
 }
@@ -480,6 +526,7 @@ void loop() {
   handleSerialCommands();
   ActuatorManager::updateServoSweep(now);
   ActuatorManager::updateLightBlink(now);
+  ActuatorManager::tickSafety(now);
 
   if (static_cast<int32_t>(now - g_nextSampleMs) < 0) {
     return;

@@ -15,6 +15,12 @@ enum class ActuatorState : uint8_t {
   On
 };
 
+enum class ActuatorCommandStatus : uint8_t {
+  Ok,
+  CooldownActive,
+  InterlockViolation
+};
+
 struct ActuatorSnapshot {
   bool lightOn;
   bool fanOn;
