@@ -38,12 +38,22 @@ void readSimulator(SensorData &data, const uint32_t sampleIndex) {
   const float rainWave = 1800.0f + 1700.0f * sinf(t * 0.67f + 2.1f);
   data.soilAO = toAdcRaw(clampf(soilWave, 0.0f, static_cast<float>(ADC_MAX)));
   data.rainAO = toAdcRaw(clampf(rainWave, 0.0f, static_cast<float>(ADC_MAX)));
+  data.soilPct = 100.0f - ((static_cast<float>(data.soilAO) * 100.0f) / static_cast<float>(ADC_MAX));
 
   data.soilDO = (data.soilAO >= SOIL_DO_THRESHOLD_AO) ? 1 : 0;
   data.rainDO = (data.rainAO >= RAIN_DO_THRESHOLD_AO) ? 1 : 0;
 
+  data.sensor_invalid = false;
   data.dht_ok = true;
   data.bh1750_ok = true;
   data.soil_ok = true;
   data.rain_ok = true;
+  data.dht_last_valid_ms = millis();
+  data.bh1750_last_valid_ms = millis();
+  data.soil_last_valid_ms = millis();
+  data.rain_last_valid_ms = millis();
+  data.dht_max_stale_ms = SENSOR_MAX_STALE_MS;
+  data.bh1750_max_stale_ms = SENSOR_MAX_STALE_MS;
+  data.soil_max_stale_ms = SENSOR_MAX_STALE_MS;
+  data.rain_max_stale_ms = SENSOR_MAX_STALE_MS;
 }

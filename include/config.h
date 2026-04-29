@@ -32,4 +32,8 @@ static constexpr float ADC_REF_VOLTAGE = 3.3f;
 static constexpr uint16_t SOIL_DO_THRESHOLD_AO = 2000;
 static constexpr uint16_t RAIN_DO_THRESHOLD_AO = 2000;
 
+static constexpr uint32_t SENSOR_SAMPLE_INTERVAL_MS = 2000;
+static constexpr uint32_t SENSOR_MAX_STALE_MS = 6000;
+static constexpr uint32_t RAIN_DEBOUNCE_MS = 1000;
+
 #endif

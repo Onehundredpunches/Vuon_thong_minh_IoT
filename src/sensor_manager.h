@@ -10,6 +10,7 @@ namespace SensorManager {
 void begin();
 SensorData read(uint32_t sampleIndex);
 void printCompactBlock(const SensorData &data);
+bool runPolicySelfTest();
 
 }  // namespace SensorManager
 

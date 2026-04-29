@@ -29,6 +29,7 @@ bool g_pumpSelfTestPass = false;
 bool g_servoSelfTestPass = false;
 bool g_pinMapSelfTestPass = false;
 bool g_actuatorSafetySelfTestPass = false;
+bool g_sensorPolicySelfTestPass = false;
 
 bool probeI2cAddress(const uint8_t addr) {
   Wire.beginTransmission(addr);
@@ -386,12 +387,13 @@ void runSelfTests() {
   runServoSelfTest();
   ActuatorManager::setSelfTestMode(false);
   g_actuatorSafetySelfTestPass = ActuatorManager::runSafetySelfTest();
+  g_sensorPolicySelfTestPass = SensorManager::runPolicySelfTest();
 
   // Restore safe default runtime states after tests.
   ActuatorManager::restoreSafeDefaults();
 
   const bool allPass = g_pinMapSelfTestPass && g_relaySelfTestPass && g_servoSelfTestPass &&
-                       g_actuatorSafetySelfTestPass;
+                       g_actuatorSafetySelfTestPass && g_sensorPolicySelfTestPass;
   Serial.print(F("SELF_TEST: "));
   Serial.println(allPass ? F("PASS") : F("FAIL"));
 }
