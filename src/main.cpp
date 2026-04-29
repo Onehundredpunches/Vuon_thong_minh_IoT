@@ -2,7 +2,6 @@
 #include <Wire.h>
 #include <DHT.h>
 #include <BH1750.h>
-#include <ESP32Servo.h>
 #include <math.h>
 #include <ctype.h>
 
@@ -14,41 +13,20 @@
 #include "log_config.h"
 #include "simulator.h"
 #include "lcd_display.h"
+#include "actuator_manager.h"
 
 namespace {
 
 DHT g_dht(PIN_DHT22_DATA, DHT22);
 BH1750 g_bh1750;
 
-Servo g_roofServo;
-const bool RELAY_ACTIVE_HIGH = true;
-
-static constexpr int SERVO_MIN_ANGLE = 0;
-static constexpr int SERVO_MAX_ANGLE = 180;
-static constexpr int SERVO_STEP_DEG = 2;
-static constexpr uint32_t SERVO_STEP_INTERVAL_MS = 20;
-static constexpr uint8_t LIGHT_BLINK_COUNT = 5;
-static constexpr uint32_t LIGHT_BLINK_INTERVAL_MS = 200;
 static constexpr bool ENABLE_BOOT_SELF_TEST = true;
-
-bool servoEnabled = true;
-bool servoSweepEnabled = false;
-int servoAngle = SERVO_MIN_ANGLE;
-int g_servoDirection = 1;
-uint32_t g_nextServoStepMs = 0;
-bool g_lightOn = false;
-bool g_fanOn = false;
-bool g_pumpOn = false;
-bool g_lightBlinkActive = false;
-uint8_t g_lightBlinkTransitionsRemaining = 0;
-uint32_t g_nextLightBlinkMs = 0;
 
 char g_serialCmdBuf[48] = {0};
 size_t g_serialCmdLen = 0;
 
 uint32_t g_nextSampleMs = 0;
 uint32_t g_sampleIndex = 0;
-bool g_selfTestMode = false;
 bool g_relaySelfTestPass = false;
 bool g_lightSelfTestPass = false;
 bool g_fanSelfTestPass = false;
@@ -67,11 +45,6 @@ bool probeI2cAddress(const uint8_t addr) {
 
 void printPinMap() {
   Serial.println(F("PINMAP I2C_SDA=21 I2C_SCL=22 DHT=27 SoilAO=34 SoilDO=26 RainAO=35 RainDO=25 SERVO=19 LIGHT=18 FAN=17 PUMP=16"));
-}
-
-void printRelayActiveLevel() {
-  Serial.print(F("RELAY_ACTIVE_LEVEL: "));
-  Serial.println(RELAY_ACTIVE_HIGH ? F("ACTIVE_HIGH") : F("ACTIVE_LOW"));
 }
 
 void scanI2cBus() {
@@ -93,130 +66,6 @@ void scanI2cBus() {
   Serial.println();
 }
 
-bool attachServoIfNeeded() {
-#if APP_MODE_SIMULATOR
-  return false;
-#else
-  if (g_selfTestMode) {
-    return true;
-  }
-  if (!g_roofServo.attached()) {
-    g_roofServo.setPeriodHertz(50);
-    g_roofServo.attach(PIN_SERVO_ROOF, 500, 2500);
-  }
-  return true;
-#endif
-}
-
-void writeServoAngle() {
-#if APP_MODE_SIMULATOR
-  return;
-#else
-  if (!servoEnabled) {
-    return;
-  }
-  if (attachServoIfNeeded()) {
-    g_roofServo.write(servoAngle);
-  }
-#endif
-}
-
-void writeRelayPin(const uint8_t pin, const bool on) {
-  if (!g_selfTestMode) {
-    const uint8_t level = (on == RELAY_ACTIVE_HIGH) ? HIGH : LOW;
-    digitalWrite(pin, level);
-  }
-}
-
-const __FlashStringHelper *relayGpioLevelName(const bool on) {
-  const bool high = (on == RELAY_ACTIVE_HIGH);
-  return high ? F("HIGH") : F("LOW");
-}
-
-void setRelayLight(const bool on) {
-  g_lightOn = on;
-  writeRelayPin(PIN_RELAY_LIGHT, on);
-}
-
-void setRelayFan(const bool on) {
-  g_fanOn = on;
-  writeRelayPin(PIN_RELAY_FAN, on);
-}
-
-void setRelayPump(const bool on) {
-  g_pumpOn = on;
-  writeRelayPin(PIN_RELAY_PUMP, on);
-}
-
-void printRelayState(const char *name, const bool on) {
-  Serial.print(name);
-  Serial.print(F(": "));
-  Serial.println(on ? F("ON") : F("OFF"));
-}
-
-void printLightState() {
-  printRelayState("LIGHT", g_lightOn);
-}
-
-void printFanState() {
-  printRelayState("FAN", g_fanOn);
-}
-
-void printPumpState() {
-  printRelayState("PUMP", g_pumpOn);
-}
-
-void printRelayCommandLog(const char *cmd, const char *name, const uint8_t pin, const bool on) {
-  Serial.print(F("ACK "));
-  Serial.print(cmd);
-  Serial.print(F(" | "));
-  Serial.print(name);
-  Serial.print('=');
-  Serial.print(on ? F("ON") : F("OFF"));
-  Serial.print(F(" GPIO"));
-  Serial.print(pin);
-  Serial.print('=');
-  Serial.println(relayGpioLevelName(on));
-}
-
-void stopLightBlink() {
-  g_lightBlinkActive = false;
-  g_lightBlinkTransitionsRemaining = 0;
-}
-
-void startLightBlink() {
-  stopLightBlink();
-  setRelayLight(true);
-  printLightState();
-  g_lightBlinkActive = true;
-  g_lightBlinkTransitionsRemaining = (LIGHT_BLINK_COUNT * 2) - 1;
-  g_nextLightBlinkMs = millis() + LIGHT_BLINK_INTERVAL_MS;
-}
-
-void updateLightBlink(const uint32_t nowMs) {
-  if (!g_lightBlinkActive) {
-    return;
-  }
-  if (static_cast<int32_t>(nowMs - g_nextLightBlinkMs) < 0) {
-    return;
-  }
-  g_nextLightBlinkMs += LIGHT_BLINK_INTERVAL_MS;
-
-  setRelayLight(!g_lightOn);
-  printLightState();
-
-  if (g_lightBlinkTransitionsRemaining > 0) {
-    --g_lightBlinkTransitionsRemaining;
-  }
-  if (g_lightBlinkTransitionsRemaining == 0) {
-    g_lightBlinkActive = false;
-    if (g_lightOn) {
-      setRelayLight(false);
-      printLightState();
-    }
-  }
-}
-
 void printHelp() {
   Serial.println(F("Commands:"));
   Serial.println(F("  help"));
@@ -236,61 +85,6 @@ void printHelp() {
   Serial.println(F("  fan off"));
   Serial.println(F("  pump on"));
   Serial.println(F("  pump off"));
-}
-
-void setServoOnOff(const bool on) {
-#if APP_MODE_SIMULATOR
-  servoEnabled = on;
-  if (!servoEnabled) {
-    servoSweepEnabled = false;
-  }
-#else
-  servoEnabled = on;
-  if (servoEnabled) {
-    attachServoIfNeeded();
-    writeServoAngle();
-  } else {
-    servoSweepEnabled = false;
-    if (!g_selfTestMode && g_roofServo.attached()) {
-      g_roofServo.detach();
-    }
-  }
-#endif
-}
-
-void printServoAck(const char *cmd) {
-  Serial.print(F("ACK "));
-  Serial.print(cmd);
-  Serial.print(F(" | SERVO="));
-  Serial.print(servoEnabled ? F("ON") : F("OFF"));
-  Serial.print(F(" ANGLE="));
-  Serial.print(servoAngle);
-  Serial.print(F(" SWEEP="));
-  Serial.print(servoSweepEnabled ? F("ON") : F("OFF"));
-  Serial.print(F(" GPIO"));
-  Serial.print(PIN_SERVO_ROOF);
-  Serial.println(servoEnabled ? F("=PWM") : F("=DETACHED"));
-}
-
-void setServoSweep(const bool enabled) {
-  servoSweepEnabled = enabled;
-  if (!servoSweepEnabled) {
-    return;
-  }
-  if (!servoEnabled) {
-    setServoOnOff(true);
-  }
-  g_servoDirection = 1;
-  g_nextServoStepMs = millis() + SERVO_STEP_INTERVAL_MS;
-}
-
-void setServoAngleCommand(const int angle) {
-  if (!servoEnabled) {
-    setServoOnOff(true);
-  }
-  servoAngle = constrain(angle, SERVO_MIN_ANGLE, SERVO_MAX_ANGLE);
-  servoSweepEnabled = false;
-  writeServoAngle();
 }
 
 void processSerialCommand(char *cmd) {
@@ -329,82 +123,82 @@ void processSerialCommand(char *cmd) {
     return;
   }
   if (strcmp(cmd, "servo off") == 0) {
-    setServoOnOff(false);
-    printServoAck(cmd);
+    ActuatorManager::setServoOnOff(false);
+    ActuatorManager::printServoAck(cmd);
     return;
   }
   if (strcmp(cmd, "servo on") == 0) {
-    setServoOnOff(true);
-    printServoAck(cmd);
+    ActuatorManager::setServoOnOff(true);
+    ActuatorManager::printServoAck(cmd);
     return;
   }
   if (strcmp(cmd, "servo sweep on") == 0) {
-    setServoSweep(true);
-    printServoAck(cmd);
+    ActuatorManager::setServoSweep(true);
+    ActuatorManager::printServoAck(cmd);
     return;
   }
   if (strcmp(cmd, "servo sweep off") == 0 || strcmp(cmd, "servo stop") == 0) {
-    setServoSweep(false);
-    printServoAck(cmd);
+    ActuatorManager::setServoSweep(false);
+    ActuatorManager::printServoAck(cmd);
     return;
   }
 
   int targetAngle = -1;
   if (sscanf(cmd, "servo %d", &targetAngle) == 1 &&
       (targetAngle == 0 || targetAngle == 90 || targetAngle == 180)) {
-    setServoAngleCommand(targetAngle);
-    printServoAck(cmd);
+    ActuatorManager::setServoAngleCommand(targetAngle);
+    ActuatorManager::printServoAck(cmd);
     return;
   }
 
   if (strcmp(cmd, "light on") == 0) {
-    printRelayCommandLog(cmd, "LIGHT", PIN_RELAY_LIGHT, true);
-    stopLightBlink();
-    setRelayLight(true);
-    printLightState();
+    ActuatorManager::printRelayCommandLog(cmd, "LIGHT", PIN_RELAY_LIGHT, true);
+    ActuatorManager::stopLightBlink();
+    ActuatorManager::setRelayLight(true);
+    ActuatorManager::printLightState();
     return;
   }
   if (strcmp(cmd, "light off") == 0) {
-    printRelayCommandLog(cmd, "LIGHT", PIN_RELAY_LIGHT, false);
-    stopLightBlink();
-    setRelayLight(false);
-    printLightState();
+    ActuatorManager::printRelayCommandLog(cmd, "LIGHT", PIN_RELAY_LIGHT, false);
+    ActuatorManager::stopLightBlink();
+    ActuatorManager::setRelayLight(false);
+    ActuatorManager::printLightState();
     return;
   }
   if (strcmp(cmd, "light toggle") == 0) {
-    printRelayCommandLog(cmd, "LIGHT", PIN_RELAY_LIGHT, !g_lightOn);
-    stopLightBlink();
-    setRelayLight(!g_lightOn);
-    printLightState();
+    ActuatorManager::printRelayCommandLog(cmd, "LIGHT", PIN_RELAY_LIGHT, !ActuatorManager::lightOn());
+    ActuatorManager::stopLightBlink();
+    ActuatorManager::setRelayLight(!ActuatorManager::lightOn());
+    ActuatorManager::printLightState();
     return;
   }
   if (strcmp(cmd, "light blink") == 0) {
-    printRelayCommandLog(cmd, "LIGHT", PIN_RELAY_LIGHT, true);
-    startLightBlink();
+    ActuatorManager::printRelayCommandLog(cmd, "LIGHT", PIN_RELAY_LIGHT, true);
+    ActuatorManager::startLightBlink();
     return;
   }
   if (strcmp(cmd, "fan on") == 0) {
-    printRelayCommandLog(cmd, "FAN", PIN_RELAY_FAN, true);
-    setRelayFan(true);
-    printFanState();
+    ActuatorManager::printRelayCommandLog(cmd, "FAN", PIN_RELAY_FAN, true);
+    ActuatorManager::setRelayFan(true);
+    ActuatorManager::printFanState();
     return;
   }
   if (strcmp(cmd, "fan off") == 0) {
-    printRelayCommandLog(cmd, "FAN", PIN_RELAY_FAN, false);
-    setRelayFan(false);
-    printFanState();
+    ActuatorManager::printRelayCommandLog(cmd, "FAN", PIN_RELAY_FAN, false);
+    ActuatorManager::setRelayFan(false);
+    ActuatorManager::printFanState();
     return;
   }
   if (strcmp(cmd, "pump on") == 0) {
-    printRelayCommandLog(cmd, "PUMP", PIN_RELAY_PUMP, true);
-    setRelayPump(true);
-    printPumpState();
+    ActuatorManager::printRelayCommandLog(cmd, "PUMP", PIN_RELAY_PUMP, true);
+    ActuatorManager::setRelayPump(true);
+    ActuatorManager::printPumpState();
     return;
   }
   if (strcmp(cmd, "pump off") == 0) {
-    printRelayCommandLog(cmd, "PUMP", PIN_RELAY_PUMP, false);
-    setRelayPump(false);
-    printPumpState();
+    ActuatorManager::printRelayCommandLog(cmd, "PUMP", PIN_RELAY_PUMP, false);
+    ActuatorManager::setRelayPump(false);
+    ActuatorManager::printPumpState();
     return;
   }
 
@@ -431,53 +225,6 @@ void handleSerialCommands() {
   }
 }
 
-void initServoControl() {
-#if APP_MODE_SIMULATOR
-  servoEnabled = false;
-  servoSweepEnabled = false;
-  servoAngle = SERVO_MIN_ANGLE;
-  Serial.println(F("SERVO: OFF"));
-#else
-  servoEnabled = true;
-  servoSweepEnabled = false;
-  servoAngle = SERVO_MIN_ANGLE;
-  g_servoDirection = 1;
-  attachServoIfNeeded();
-  writeServoAngle();
-  g_nextServoStepMs = millis() + SERVO_STEP_INTERVAL_MS;
-  Serial.println(F("SERVO: ON"));
-  Serial.println(F("SERVO: SWEEP OFF"));
-  Serial.print(F("SERVO: ANGLE="));
-  Serial.println(servoAngle);
-#endif
-}
-
-void updateServoSweep(const uint32_t nowMs) {
-#if APP_MODE_SIMULATOR
-  (void)nowMs;
-#else
-  if (!servoEnabled || !servoSweepEnabled || (!g_selfTestMode && !g_roofServo.attached())) {
-    return;
-  }
-  if (static_cast<int32_t>(nowMs - g_nextServoStepMs) < 0) {
-    return;
-  }
-  g_nextServoStepMs += SERVO_STEP_INTERVAL_MS;
-
-  servoAngle += (SERVO_STEP_DEG * g_servoDirection);
-  if (servoAngle >= SERVO_MAX_ANGLE) {
-    servoAngle = SERVO_MAX_ANGLE;
-    g_servoDirection = -1;
-  } else if (servoAngle <= SERVO_MIN_ANGLE) {
-    servoAngle = SERVO_MIN_ANGLE;
-    g_servoDirection = 1;
-  }
-  if (!g_selfTestMode) {
-    g_roofServo.write(servoAngle);
-  }
-#endif
-}
-
 void executeCommandForTest(const char *cmd) {
   char local[48] = {0};
   strncpy(local, cmd, sizeof(local) - 1);
@@ -495,52 +242,47 @@ bool reportTestStep(const char *group, const char *step, const bool pass) {
 
 void runRelaySelfTest() {
   bool allPass = true;
-  stopLightBlink();
-  setRelayLight(false);
-  g_lightSelfTestPass = reportTestStep("LIGHT_TEST", "boot_off", !g_lightOn);
+  ActuatorManager::stopLightBlink();
+  ActuatorManager::setRelayLight(false);
+  g_lightSelfTestPass = reportTestStep("LIGHT_TEST", "boot_off", !ActuatorManager::lightOn());
   allPass &= g_lightSelfTestPass;
 
   executeCommandForTest("light on");
-  g_lightSelfTestPass &= reportTestStep("LIGHT_TEST", "light_on", g_lightOn);
+  g_lightSelfTestPass &= reportTestStep("LIGHT_TEST", "light_on", ActuatorManager::lightOn());
   allPass &= g_lightSelfTestPass;
 
   executeCommandForTest("light off");
-  g_lightSelfTestPass &= reportTestStep("LIGHT_TEST", "light_off", !g_lightOn);
+  g_lightSelfTestPass &= reportTestStep("LIGHT_TEST", "light_off", !ActuatorManager::lightOn());
   allPass &= g_lightSelfTestPass;
 
   executeCommandForTest("light toggle");
-  g_lightSelfTestPass &= reportTestStep("LIGHT_TEST", "toggle_on", g_lightOn);
+  g_lightSelfTestPass &= reportTestStep("LIGHT_TEST", "toggle_on", ActuatorManager::lightOn());
   allPass &= g_lightSelfTestPass;
 
   executeCommandForTest("light toggle");
-  g_lightSelfTestPass &= reportTestStep("LIGHT_TEST", "toggle_off", !g_lightOn);
+  g_lightSelfTestPass &= reportTestStep("LIGHT_TEST", "toggle_off", !ActuatorManager::lightOn());
   allPass &= g_lightSelfTestPass;
 
   executeCommandForTest("light blink");
-  uint32_t simNow = g_nextLightBlinkMs;
-  uint8_t guard = 32;
-  while (g_lightBlinkActive && guard > 0) {
-    updateLightBlink(simNow);
-    simNow += LIGHT_BLINK_INTERVAL_MS;
-    --guard;
-  }
-  g_lightSelfTestPass &= reportTestStep("LIGHT_TEST", "blink_complete_off", !g_lightBlinkActive && !g_lightOn);
+  ActuatorManager::completeLightBlinkForTest();
+  g_lightSelfTestPass &= reportTestStep("LIGHT_TEST", "blink_complete_off",
+                                        !ActuatorManager::lightBlinkActive() && !ActuatorManager::lightOn());
   allPass &= g_lightSelfTestPass;
 
-  setRelayFan(false);
-  g_fanSelfTestPass = reportTestStep("FAN_TEST", "boot_off", !g_fanOn);
+  ActuatorManager::setRelayFan(false);
+  g_fanSelfTestPass = reportTestStep("FAN_TEST", "boot_off", !ActuatorManager::fanOn());
   executeCommandForTest("fan on");
-  g_fanSelfTestPass &= reportTestStep("FAN_TEST", "fan_on", g_fanOn);
+  g_fanSelfTestPass &= reportTestStep("FAN_TEST", "fan_on", ActuatorManager::fanOn());
   executeCommandForTest("fan off");
-  g_fanSelfTestPass &= reportTestStep("FAN_TEST", "fan_off", !g_fanOn);
+  g_fanSelfTestPass &= reportTestStep("FAN_TEST", "fan_off", !ActuatorManager::fanOn());
   allPass &= g_fanSelfTestPass;
 
-  setRelayPump(false);
-  g_pumpSelfTestPass = reportTestStep("PUMP_TEST", "boot_off", !g_pumpOn);
+  ActuatorManager::setRelayPump(false);
+  g_pumpSelfTestPass = reportTestStep("PUMP_TEST", "boot_off", !ActuatorManager::pumpOn());
   executeCommandForTest("pump on");
-  g_pumpSelfTestPass &= reportTestStep("PUMP_TEST", "pump_on", g_pumpOn);
+  g_pumpSelfTestPass &= reportTestStep("PUMP_TEST", "pump_on", ActuatorManager::pumpOn());
   executeCommandForTest("pump off");
-  g_pumpSelfTestPass &= reportTestStep("PUMP_TEST", "pump_off", !g_pumpOn);
+  g_pumpSelfTestPass &= reportTestStep("PUMP_TEST", "pump_off", !ActuatorManager::pumpOn());
   allPass &= g_pumpSelfTestPass;
 
   Serial.print(F("LIGHT_SELF_TEST: "));
@@ -559,20 +301,22 @@ void runServoSelfTest() {
   bool allPass = true;
 
   executeCommandForTest("servo on");
-  allPass &= reportTestStep("SERVO_TEST", "servo_on", servoEnabled);
+  allPass &= reportTestStep("SERVO_TEST", "servo_on", ActuatorManager::servoEnabled());
 
   executeCommandForTest("servo sweep on");
-  allPass &= reportTestStep("SERVO_TEST", "sweep_on", servoEnabled && servoSweepEnabled);
+  allPass &= reportTestStep("SERVO_TEST", "sweep_on",
+                            ActuatorManager::servoEnabled() && ActuatorManager::servoSweepEnabled());
 
   executeCommandForTest("servo sweep off");
-  allPass &= reportTestStep("SERVO_TEST", "sweep_off", !servoSweepEnabled);
+  allPass &= reportTestStep("SERVO_TEST", "sweep_off", !ActuatorManager::servoSweepEnabled());
 
   executeCommandForTest("servo 180");
-  allPass &= reportTestStep("SERVO_TEST", "angle_180", servoAngle == 180 && !servoSweepEnabled);
+  allPass &= reportTestStep("SERVO_TEST", "angle_180",
+                            ActuatorManager::servoAngle() == 180 && !ActuatorManager::servoSweepEnabled());
 
   executeCommandForTest("servo off");
-  bool detachedOrSelfTest = g_selfTestMode || !g_roofServo.attached();
-  allPass &= reportTestStep("SERVO_TEST", "servo_off", !servoEnabled && detachedOrSelfTest);
+  allPass &= reportTestStep("SERVO_TEST", "servo_off",
+                            !ActuatorManager::servoEnabled() && ActuatorManager::servoDetachedOrSelfTest());
 
   g_servoSelfTestPass = allPass;
   Serial.print(F("SERVO_SELF_TEST: "));
@@ -601,23 +345,14 @@ void runSelfTests() {
     return;
   }
   Serial.println(F("SELF_TEST: START"));
-  g_selfTestMode = true;
+  ActuatorManager::setSelfTestMode(true);
   runPinMapSelfTest();
   runRelaySelfTest();
   runServoSelfTest();
-  g_selfTestMode = false;
+  ActuatorManager::setSelfTestMode(false);
 
   // Restore safe default runtime states after tests.
-  stopLightBlink();
-  setRelayLight(false);
-  setRelayFan(false);
-  setRelayPump(false);
-  servoEnabled = true;
-  servoSweepEnabled = false;
-  servoAngle = SERVO_MIN_ANGLE;
-  g_servoDirection = 1;
-  attachServoIfNeeded();
-  writeServoAngle();
+  ActuatorManager::restoreSafeDefaults();
 
   const bool allPass = g_pinMapSelfTestPass && g_relaySelfTestPass && g_servoSelfTestPass;
   Serial.print(F("SELF_TEST: "));
@@ -698,7 +433,7 @@ void printStartup() {
   Serial.println(F("MODE: HARDWARE"));
 #endif
   printPinMap();
-  printRelayActiveLevel();
+  ActuatorManager::printRelayActiveLevel();
 }
 
 }  // namespace
@@ -712,20 +447,14 @@ void setup() {
   pinMode(PIN_RAIN_AO, INPUT);
   pinMode(PIN_SOIL_DO, INPUT);
   pinMode(PIN_RAIN_DO, INPUT);
-  pinMode(PIN_RELAY_LIGHT, OUTPUT);
-  pinMode(PIN_RELAY_FAN, OUTPUT);
-  pinMode(PIN_RELAY_PUMP, OUTPUT);
-
-  setRelayLight(false);
-  setRelayFan(false);
-  setRelayPump(false);
+  ActuatorManager::begin();
 
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
 
   printStartup();
-  printLightState();
-  printFanState();
-  printPumpState();
+  ActuatorManager::printLightState();
+  ActuatorManager::printFanState();
+  ActuatorManager::printPumpState();
   scanI2cBus();
 
 #if APP_MODE_SIMULATOR
@@ -739,7 +468,7 @@ void setup() {
 #endif
 
   initLcdIfPresent();
-  initServoControl();
+  ActuatorManager::initServoControl();
   runSelfTests();
   printHelp();
 
@@ -749,8 +478,8 @@ void setup() {
 void loop() {
   const uint32_t now = millis();
   handleSerialCommands();
-  updateServoSweep(now);
-  updateLightBlink(now);
+  ActuatorManager::updateServoSweep(now);
+  ActuatorManager::updateLightBlink(now);
 
   if (static_cast<int32_t>(now - g_nextSampleMs) < 0) {
     return;
