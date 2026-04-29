@@ -2,7 +2,6 @@
 #include <Wire.h>
 #include <DHT.h>
 #include <BH1750.h>
-#include <LiquidCrystal_I2C.h>
 #include <ESP32Servo.h>
 #include <math.h>
 #include <ctype.h>
@@ -14,14 +13,12 @@
 #include "pins_validate.h"
 #include "log_config.h"
 #include "simulator.h"
+#include "lcd_display.h"
 
 namespace {
 
 DHT g_dht(PIN_DHT22_DATA, DHT22);
 BH1750 g_bh1750;
-LiquidCrystal_I2C g_lcd27(0x27, LCD_COLS, LCD_ROWS);
-LiquidCrystal_I2C g_lcd3f(0x3F, LCD_COLS, LCD_ROWS);
-LiquidCrystal_I2C *g_lcd = nullptr;
 
 Servo g_roofServo;
 const bool RELAY_ACTIVE_HIGH = true;
@@ -49,12 +46,8 @@ uint32_t g_nextLightBlinkMs = 0;
 char g_serialCmdBuf[48] = {0};
 size_t g_serialCmdLen = 0;
 
-bool g_lcdAvailable = false;
-bool g_lcdWarnPrinted = false;
-bool g_lcdShowAltLine = false;
 uint32_t g_nextSampleMs = 0;
 uint32_t g_sampleIndex = 0;
-uint8_t g_lcdAddr = LCD_I2C_ADDR;
 bool g_selfTestMode = false;
 bool g_relaySelfTestPass = false;
 bool g_lightSelfTestPass = false;
@@ -629,103 +622,6 @@ void runSelfTests() {
   const bool allPass = g_pinMapSelfTestPass && g_relaySelfTestPass && g_servoSelfTestPass;
   Serial.print(F("SELF_TEST: "));
   Serial.println(allPass ? F("PASS") : F("FAIL"));
-}
-
-void initLcdIfPresent() {
-#if APP_MODE_SIMULATOR
-  g_lcdAvailable = false;
-#else
-  if (probeI2cAddress(0x27)) {
-    g_lcd = &g_lcd27;
-    g_lcdAddr = 0x27;
-    g_lcdAvailable = true;
-  } else if (probeI2cAddress(0x3F)) {
-    g_lcd = &g_lcd3f;
-    g_lcdAddr = 0x3F;
-    g_lcdAvailable = true;
-  } else {
-    g_lcdAvailable = false;
-  }
-
-  if (g_lcdAvailable && g_lcd != nullptr) {
-    g_lcd->init();
-    g_lcd->backlight();
-    g_lcd->clear();
-    Serial.print(F("LCD_OK 0x"));
-    if (g_lcdAddr < 16) {
-      Serial.print('0');
-    }
-    Serial.println(g_lcdAddr, HEX);
-  }
-#endif
-
-  if (!g_lcdAvailable && !g_lcdWarnPrinted) {
-    Serial.println(F("LCD_WARN (addr 0x27/0x3F not found)"));
-    g_lcdWarnPrinted = true;
-  }
-}
-
-void buildLcdLine1(const SensorData &d, char *out, const size_t outSize) {
-  if (d.dhtOk) {
-    snprintf(out, outSize, "T:%4.1fC H:%3.0f%%", d.temperatureC, d.humidityPct);
-  } else {
-    snprintf(out, outSize, "T:ERR H:ERR");
-  }
-}
-
-void buildLcdLine2Sensor(const SensorData &d, char *out, const size_t outSize) {
-  const int luxInt = d.bh1750Ok ? static_cast<int>(d.lux + 0.5f) : -1;
-  if (d.bh1750Ok) {
-    snprintf(out, outSize, "Lux:%6d lx", luxInt);
-  } else {
-    snprintf(out, outSize, "Lux:ERR");
-  }
-}
-
-void buildLcdLineIo1(const SensorData &d, char *out, const size_t outSize) {
-  snprintf(out, outSize, "S:%4u R:%4u", d.soilAO, d.rainAO);
-}
-
-void buildLcdLineIo2(const SensorData &d, char *out, const size_t outSize) {
-  snprintf(out, outSize, "SD:%u RD:%u", d.soilDO, d.rainDO);
-}
-
-void fitToLcd16(char *line) {
-  const size_t len = strlen(line);
-  if (len >= LCD_COLS) {
-    line[LCD_COLS] = '\0';
-    return;
-  }
-  for (size_t i = len; i < LCD_COLS; ++i) {
-    line[i] = ' ';
-  }
-  line[LCD_COLS] = '\0';
-}
-
-void updateLcd(const SensorData &d) {
-  if (!g_lcdAvailable || g_lcd == nullptr) {
-    return;
-  }
-
-  char line1[LCD_COLS + 1] = {0};
-  char line2[LCD_COLS + 1] = {0};
-
-  if (g_lcdShowAltLine) {
-    buildLcdLineIo1(d, line1, sizeof(line1));
-    buildLcdLineIo2(d, line2, sizeof(line2));
-  } else {
-    buildLcdLine1(d, line1, sizeof(line1));
-    buildLcdLine2Sensor(d, line2, sizeof(line2));
-  }
-  g_lcdShowAltLine = !g_lcdShowAltLine;
-
-  fitToLcd16(line1);
-  fitToLcd16(line2);
-
-  g_lcd->setCursor(0, 0);
-  g_lcd->print(line1);
-  g_lcd->setCursor(0, 1);
-  g_lcd->print(line2);
 }
 
 void readHardware(SensorData &d) {
