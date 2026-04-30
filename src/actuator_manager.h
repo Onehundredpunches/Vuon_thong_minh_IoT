@@ -27,6 +27,7 @@ void startLightBlink();
 void setServoOnOff(bool on);
 void setServoSweep(bool enabled);
 void setServoAngleCommand(int angle);
+bool roofMotionActive();
 ActuatorCommandStatus requestLight(bool on, uint32_t nowMs);
 ActuatorCommandStatus requestLightBlink(uint32_t nowMs);
 ActuatorCommandStatus requestFan(bool on, uint32_t nowMs);

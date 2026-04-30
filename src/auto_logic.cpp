@@ -15,7 +15,6 @@ uint8_t g_lightOffConfirm = 0;
 enum class RoofState { Open, Closed };
 
 RoofState g_roofState = RoofState::Closed;
-int g_lastServoTarget = AUTO_ROOF_SAFE_ANGLE;
 uint32_t g_lastServoCmdMs = 0;
 bool g_rainWasDetected = false;
 
@@ -44,29 +43,37 @@ void printRainState(const SensorData &data) {
 
 void printRoofState() {
   Serial.print(F("ROOF_STATE current="));
-  Serial.print(roofStateText());
-  Serial.print(F(" last_servo_target="));
-  Serial.print(g_lastServoTarget);
+  Serial.print((g_roofState == RoofState::Open) ? F("O") : F("C"));
   Serial.print(F(" last_servo_cmd_ms="));
-  Serial.println(g_lastServoCmdMs);
+  Serial.print(g_lastServoCmdMs);
+  Serial.print(F(" roof_motion_active="));
+  Serial.println(ActuatorManager::roofMotionActive() ? 1 : 0);
 }
 
 void printRoofCmd(const int target, const bool sent, const __FlashStringHelper *reason) {
-  Serial.print(F("ROOF_CMD target="));
-  Serial.print(target);
+  const bool opening = target == AUTO_ROOF_OPEN_ANGLE;
+  Serial.print(F("ROOF_CMD action="));
+  Serial.print(opening ? F("OPEN") : F("CLOSE"));
+  Serial.print(F(" cmd="));
+  Serial.print(opening ? 70 : 110);
+  Serial.print(F(" dur_ms="));
+  Serial.print(1800);
   Serial.print(F(" sent="));
   Serial.print(sent ? 1 : 0);
   Serial.print(F(" reason="));
   Serial.print(reason);
-  Serial.print(F(" last_servo_target="));
-  Serial.print(g_lastServoTarget);
   Serial.print(F(" last_servo_cmd_ms="));
-  Serial.println(g_lastServoCmdMs);
+  Serial.print(g_lastServoCmdMs);
+  Serial.print(F(" roof_motion_active="));
+  Serial.println(ActuatorManager::roofMotionActive() ? 1 : 0);
 }
 
 bool sendRoofCommand(const int target, const uint32_t nowMs, const __FlashStringHelper *reason) {
-  if (ActuatorManager::servoAngle() == target || g_lastServoTarget == target) {
-    g_lastServoTarget = target;
+  if (ActuatorManager::roofMotionActive()) {
+    printRoofCmd(target, false, F("guard_block"));
+    return false;
+  }
+  if (ActuatorManager::servoAngle() == target) {
     g_roofState = (target == AUTO_ROOF_OPEN_ANGLE) ? RoofState::Open : RoofState::Closed;
     printRoofCmd(target, false, F("no_change"));
     return false;
@@ -78,7 +85,6 @@ bool sendRoofCommand(const int target, const uint32_t nowMs, const __FlashString
   const ActuatorCommandStatus status = ActuatorManager::requestServoAngleCommand(target, nowMs);
   const bool sent = status == ActuatorCommandStatus::Ok;
   if (sent) {
-    g_lastServoTarget = target;
     g_lastServoCmdMs = nowMs;
     g_roofState = (target == AUTO_ROOF_OPEN_ANGLE) ? RoofState::Open : RoofState::Closed;
     printRoofCmd(target, true, reason);
@@ -244,7 +250,6 @@ SensorData makeSample(const float tempC, const float lux, const float soilPct, c
 void begin(const uint32_t nowMs) {
   g_rainClearSinceMs = nowMs;
   g_roofState = (ActuatorManager::servoAngle() == AUTO_ROOF_OPEN_ANGLE) ? RoofState::Open : RoofState::Closed;
-  g_lastServoTarget = ActuatorManager::servoAngle();
   g_lastServoCmdMs = 0;
   g_rainWasDetected = false;
   g_pumpOnConfirm = 0;
@@ -288,10 +293,10 @@ bool runSelfTest() {
 
   begin(1000);
   g_roofState = RoofState::Open;
-  g_lastServoTarget = AUTO_ROOF_OPEN_ANGLE;
   ActuatorManager::requestServoAngleCommand(AUTO_ROOF_OPEN_ANGLE, 1000);
 
   tick(1000, makeSample(29.0f, 3.0f, 30.0f, 1));
+  ActuatorManager::updateServoSweep(3000);
   tick(3000, makeSample(29.0f, 3.0f, 30.0f, 1));
   pass &= ActuatorManager::fanOn();
   pass &= ActuatorManager::lightOn();
@@ -314,6 +319,7 @@ bool runSelfTest() {
 
   tick(9000, makeSample(25.0f, 7.0f, 60.0f, 0));
   pass &= ActuatorManager::servoAngle() == AUTO_ROOF_SAFE_ANGLE;
+  ActuatorManager::updateServoSweep(11000);
   tick(11000, makeSample(25.0f, 7.0f, 60.0f, 1));
   tick(11000 + RAIN_CLEAR_REOPEN_DELAY_MS + 1, makeSample(25.0f, 7.0f, 60.0f, 1));
   pass &= ActuatorManager::servoAngle() == AUTO_ROOF_OPEN_ANGLE;
