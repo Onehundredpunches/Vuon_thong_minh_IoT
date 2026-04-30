@@ -17,6 +17,10 @@ uint32_t g_pumpLastOffMs = 0;
 uint32_t g_pumpInvalidSinceMs = 0;
 bool g_pumpInvalidHoldLogged = false;
 bool g_pumpInvalidForceLogged = false;
+bool g_autoPumpCommandedOn = false;
+bool g_autoPumpSafetyLockout = false;
+bool g_autoPumpSafetyLockoutLogged = false;
+SystemMode g_lastAutoPumpOwnerMode = SystemMode::Boot;
 enum class RoofState { Open, Closed };
 
 RoofState g_roofState = RoofState::Closed;
@@ -78,22 +82,42 @@ void printRoofCmd(const int target, const bool sent, const __FlashStringHelper *
 
 void printPumpDecision(const bool oldState, const bool newState, const SensorData &data,
                        const __FlashStringHelper *reason, const ActuatorCommandStatus status) {
-  Serial.print(F("PUMP_DECISION old_state="));
+  const bool sensorInvalid = !data.soil_ok;
+  Serial.print(F("PUMP_DECISION mode="));
+  Serial.print(ModeController::modeName());
+  Serial.print(F(" soil_ok="));
+  Serial.print(data.soil_ok ? 1 : 0);
+  Serial.print(F(" sensor_invalid="));
+  Serial.print(sensorInvalid ? 1 : 0);
+  Serial.print(F(" soilPct="));
+  Serial.print(data.soilPct, 1);
+  Serial.print(F(" soilDO="));
+  Serial.print(data.soilDO);
+  Serial.print(F(" old_state="));
   Serial.print(oldState ? F("ON") : F("OFF"));
   Serial.print(F(" new_state="));
   Serial.print(newState ? F("ON") : F("OFF"));
-  Serial.print(F(" soilPct="));
-  Serial.print(data.soilPct, 1);
   Serial.print(F(" rainDO="));
   Serial.print(data.rainDO);
   Serial.print(F(" rainAO="));
   Serial.print(data.rainAO);
-  Serial.print(F(" mode="));
-  Serial.print(ModeController::modeName());
   Serial.print(F(" reason="));
   Serial.print(reason);
   Serial.print(F(" status="));
   Serial.println(status == ActuatorCommandStatus::Ok ? F("ok") : ActuatorManager::statusReason(status));
+}
+
+void resetAutoPumpRuntimeState() {
+  g_pumpOnConfirm = 0;
+  g_pumpOffConfirm = 0;
+  g_pumpLastOnMs = 0;
+  g_pumpLastOffMs = 0;
+  g_pumpInvalidSinceMs = 0;
+  g_pumpInvalidHoldLogged = false;
+  g_pumpInvalidForceLogged = false;
+  g_autoPumpCommandedOn = false;
+  g_autoPumpSafetyLockout = false;
+  g_autoPumpSafetyLockoutLogged = false;
 }
 
 bool sendRoofCommand(const int target, const uint32_t nowMs, const __FlashStringHelper *reason) {
@@ -170,6 +194,7 @@ void applyPumpPolicy(const uint32_t nowMs, const SensorData &data) {
     const ActuatorCommandStatus status = ActuatorManager::requestPump(false, nowMs);
     if (status == ActuatorCommandStatus::Ok) {
       g_pumpLastOffMs = nowMs;
+      g_autoPumpCommandedOn = false;
     }
     if (oldState || status != ActuatorCommandStatus::Ok || !g_pumpInvalidForceLogged) {
       printPumpDecision(oldState, ActuatorManager::pumpOn(), data, F("SOIL_INVALID_FORCE_OFF"), status);
@@ -180,9 +205,23 @@ void applyPumpPolicy(const uint32_t nowMs, const SensorData &data) {
   g_pumpInvalidSinceMs = 0;
   g_pumpInvalidHoldLogged = false;
   g_pumpInvalidForceLogged = false;
+  const bool pumpOn = ActuatorManager::pumpOn();
+  if (g_autoPumpCommandedOn && !pumpOn && !g_autoPumpSafetyLockout) {
+    g_autoPumpSafetyLockout = true;
+    g_autoPumpSafetyLockoutLogged = false;
+    g_pumpLastOffMs = nowMs;
+  }
+  if (g_autoPumpSafetyLockout && !g_autoPumpSafetyLockoutLogged) {
+    printPumpDecision(true, false, data, F("SAFETY_OFF"), ActuatorCommandStatus::Ok);
+    g_autoPumpSafetyLockoutLogged = true;
+  }
   if (!ActuatorManager::pumpOn()) {
     g_pumpOffConfirm = 0;
     if (data.soilPct < AUTO_SOIL_PUMP_ON_PCT) {
+      if (g_autoPumpSafetyLockout) {
+        g_pumpOnConfirm = 0;
+        return;
+      }
       ++g_pumpOnConfirm;
       Serial.print(F("AUTO_PUMP_CONFIRM reason=soil_dry pct="));
       Serial.print(data.soilPct, 1);
@@ -195,6 +234,9 @@ void applyPumpPolicy(const uint32_t nowMs, const SensorData &data) {
                                                            : ActuatorCommandStatus::CooldownActive;
         if (status == ActuatorCommandStatus::Ok) {
           g_pumpLastOnMs = nowMs;
+          g_autoPumpCommandedOn = true;
+          g_autoPumpSafetyLockout = false;
+          g_autoPumpSafetyLockoutLogged = false;
         }
         printPumpDecision(oldState, ActuatorManager::pumpOn(), data,
                           offGuardClear ? F("SOIL_DRY_ON") : F("MIN_OFF_HOLD"), status);
@@ -218,6 +260,9 @@ void applyPumpPolicy(const uint32_t nowMs, const SensorData &data) {
                                                           : ActuatorCommandStatus::CooldownActive;
         if (status == ActuatorCommandStatus::Ok) {
           g_pumpLastOffMs = nowMs;
+          g_autoPumpCommandedOn = false;
+          g_autoPumpSafetyLockout = false;
+          g_autoPumpSafetyLockoutLogged = false;
         }
         printPumpDecision(oldState, ActuatorManager::pumpOn(), data,
                           onGuardClear ? F("SOIL_WET_OFF") : F("MIN_ON_HOLD"), status);
@@ -226,6 +271,15 @@ void applyPumpPolicy(const uint32_t nowMs, const SensorData &data) {
     } else {
       g_pumpOffConfirm = 0;
     }
+  }
+  if (!ActuatorManager::pumpOn() && data.soilPct > AUTO_SOIL_PUMP_OFF_PCT &&
+      (g_autoPumpCommandedOn || g_autoPumpSafetyLockout)) {
+    g_autoPumpCommandedOn = false;
+    g_autoPumpSafetyLockout = false;
+    g_autoPumpSafetyLockoutLogged = false;
+    g_pumpOnConfirm = 0;
+    g_pumpOffConfirm = 0;
+    printPumpDecision(false, false, data, F("SOIL_WET_OFF"), ActuatorCommandStatus::Ok);
   }
 }
 
@@ -311,19 +365,22 @@ void begin(const uint32_t nowMs) {
   g_roofState = (ActuatorManager::servoAngle() == AUTO_ROOF_OPEN_ANGLE) ? RoofState::Open : RoofState::Closed;
   g_lastServoCmdMs = 0;
   g_rainWasDetected = false;
-  g_pumpOnConfirm = 0;
-  g_pumpOffConfirm = 0;
-  g_pumpLastOnMs = 0;
-  g_pumpLastOffMs = 0;
-  g_pumpInvalidSinceMs = 0;
-  g_pumpInvalidHoldLogged = false;
-  g_pumpInvalidForceLogged = false;
+  resetAutoPumpRuntimeState();
+  g_lastAutoPumpOwnerMode = ModeController::mode();
   g_lightOnConfirm = 0;
   g_lightOffConfirm = 0;
 }
 
 void tick(const uint32_t nowMs, const SensorData &data) {
-  if (ModeController::mode() != SystemMode::Auto) {
+  const SystemMode currentMode = ModeController::mode();
+  if (currentMode != g_lastAutoPumpOwnerMode) {
+    if (currentMode == SystemMode::Auto || g_lastAutoPumpOwnerMode == SystemMode::Auto) {
+      resetAutoPumpRuntimeState();
+    }
+    g_lastAutoPumpOwnerMode = currentMode;
+  }
+
+  if (currentMode != SystemMode::Auto) {
     if (data.bh1750_ok) {
       Serial.print(F("LIGHT_DECISION lux="));
       Serial.print(data.lux, 1);
