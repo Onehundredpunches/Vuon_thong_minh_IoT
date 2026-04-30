@@ -217,7 +217,7 @@ void applyPumpPolicy(const uint32_t nowMs, const SensorData &data) {
   }
   if (!ActuatorManager::pumpOn()) {
     g_pumpOffConfirm = 0;
-    if (data.soilPct < AUTO_SOIL_PUMP_ON_PCT) {
+    if (data.soilPct < AUTO_SOIL_PUMP_ON_PCT && data.soilDO == 1) {
       if (g_autoPumpSafetyLockout) {
         g_pumpOnConfirm = 0;
         return;
