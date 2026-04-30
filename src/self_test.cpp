@@ -1,6 +1,7 @@
 #include "self_test.h"
 
 #include <Arduino.h>
+#include <string.h>
 
 #include "actuator_manager.h"
 #include "auto_logic.h"
@@ -31,6 +32,7 @@ bool g_autoLogicSelfTestPass = false;
 bool g_mqttReconnectSelfTestPass = false;
 bool g_mqttCommandAckSelfTestPass = false;
 bool g_mqttRetainedStateSelfTestPass = false;
+bool g_fullIntegrationSelfTestPass = false;
 
 bool reportTestStep(const char *group, const char *step, const bool pass) {
   Serial.print(group);
@@ -141,6 +143,52 @@ void runPinMapSelfTest() {
   g_pinMapSelfTestPass = reportTestStep("PINMAP_TEST", "schematic_a3", pass);
 }
 
+bool runFullIntegrationSelfTest() {
+  bool pass = true;
+  ActuatorManager::setSelfTestMode(true);
+  ActuatorManager::restoreSafeDefaults();
+  ModeController::begin(1000);
+  pass &= ModeController::setAuto("integration_test", 1100);
+
+  CommandHandler::ExecuteResult result = CommandHandler::executeStructured("light on", false, 1200);
+  pass &= result.status == CommandHandler::ExecuteStatus::Rejected &&
+          strcmp(result.reason, "invalid_mode") == 0;
+
+  pass &= ModeController::setManual("integration_test", 1300);
+  result = CommandHandler::executeStructured("light on", false, 1400);
+  pass &= result.status == CommandHandler::ExecuteStatus::Ok && ActuatorManager::lightOn();
+
+  pass &= ModeController::setAuto("integration_test", 1500);
+  SensorData invalid{};
+  invalid.temperatureC = 31.0f;
+  invalid.humidityPct = 70.0f;
+  invalid.lux = 1000.0f;
+  invalid.soilPct = 20.0f;
+  invalid.rainDO = 1;
+  invalid.dht_ok = false;
+  invalid.bh1750_ok = false;
+  invalid.soil_ok = false;
+  invalid.rain_ok = false;
+  invalid.sensor_invalid = true;
+  AutoLogic::tick(1600, invalid);
+  pass &= !ActuatorManager::lightOn();
+  pass &= !ActuatorManager::fanOn();
+  pass &= !ActuatorManager::pumpOn();
+  pass &= ActuatorManager::servoAngle() == AUTO_ROOF_SAFE_ANGLE;
+
+  ModeController::enterSafeStop("integration_fault", 1700);
+  result = CommandHandler::executeStructured("pump on", false, 1800);
+  pass &= result.status == CommandHandler::ExecuteStatus::Rejected &&
+          strcmp(result.reason, "sensor_fault_active") == 0;
+
+  ActuatorManager::restoreSafeDefaults();
+  ActuatorManager::setSelfTestMode(false);
+  ModeController::begin(millis());
+  Serial.print(F("FULL_INTEGRATION_SELF_TEST: "));
+  Serial.println(pass ? F("PASS") : F("FAIL"));
+  return pass;
+}
+
 }  // namespace
 
 bool run(const CommandExecutor executeCommand) {
@@ -162,6 +210,7 @@ bool run(const CommandExecutor executeCommand) {
   g_mqttReconnectSelfTestPass = MqttManager::runReconnectSelfTest();
   g_mqttCommandAckSelfTestPass = MqttManager::runCommandAckSelfTest();
   g_mqttRetainedStateSelfTestPass = MqttManager::runRetainedStateSelfTest();
+  g_fullIntegrationSelfTestPass = runFullIntegrationSelfTest();
   g_lcdFormatterSelfTestPass = runLcdFormatterSelfTest();
   Serial.print(F("LCD_DEVICE_SELF_TEST: "));
   Serial.println(lcdDeviceAvailable() ? F("READY") : F("NOT_READY"));
@@ -173,7 +222,7 @@ bool run(const CommandExecutor executeCommand) {
                        g_commandHandlerSelfTestPass && g_modeFsmSelfTestPass &&
                        g_autoLogicSelfTestPass && g_mqttReconnectSelfTestPass &&
                        g_mqttCommandAckSelfTestPass && g_mqttRetainedStateSelfTestPass &&
-                       g_lcdFormatterSelfTestPass;
+                       g_fullIntegrationSelfTestPass && g_lcdFormatterSelfTestPass;
   Serial.print(F("SELF_TEST: "));
   Serial.println(allPass ? F("PASS") : F("FAIL"));
   return allPass;

@@ -69,6 +69,7 @@ uint32_t g_mqttBackoffMs = 3000;
 uint8_t g_wifiFailureCount = 0;
 bool g_wifiStarted = false;
 bool g_everMqttConnected = false;
+bool g_lastMqttConnected = false;
 bool g_scanStarted = false;
 bool g_scanDone = false;
 bool g_targetSsidFound = false;
@@ -517,6 +518,10 @@ void startWifiAttempt(const uint32_t nowMs) {
 
 void attemptMqttConnect(const uint32_t nowMs) {
   if (WiFi.status() != WL_CONNECTED) {
+    if (g_mqtt.connected()) {
+      g_mqtt.disconnect();
+      Serial.println(F("MQTT_DISCONNECT reason=wifi_down"));
+    }
     return;
   }
   if (g_mqtt.connected()) {
@@ -590,7 +595,21 @@ void tick(const uint32_t nowMs) {
     Serial.print(F("WIFI_CONNECTED ip="));
     Serial.println(WiFi.localIP());
   }
+  if (g_lastMqttConnected && !g_mqtt.connected()) {
+    Serial.println(F("MQTT_STATUS_CHANGE connected=0"));
+    g_lastMqttConnected = false;
+    g_nextMqttAttemptMs = nowMs;
+  }
   attemptMqttConnect(nowMs);
+  const bool mqttNowConnected = g_mqtt.connected();
+  if (mqttNowConnected != g_lastMqttConnected) {
+    Serial.print(F("MQTT_STATUS_CHANGE connected="));
+    Serial.println(mqttNowConnected ? F("1") : F("0"));
+    g_lastMqttConnected = mqttNowConnected;
+    if (!mqttNowConnected) {
+      g_nextMqttAttemptMs = nowMs;
+    }
+  }
   if (g_mqtt.connected() && g_haveSensorState &&
       static_cast<uint32_t>(nowMs - g_lastStatePublishMs) >= LOOP_INTERVAL_MS) {
     publishSensorState();
