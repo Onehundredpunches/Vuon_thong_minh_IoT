@@ -120,6 +120,7 @@ void loop() {
   lcdState.mqttOk = MqttManager::mqttConnected();
   lcdState.controlOwner = AutoLogic::controlOwner();
   updateLcd(now, lcdState);
+  MqttManager::updateState(now, data, lcdState.actuators);
 
   ++g_sampleIndex;
 }

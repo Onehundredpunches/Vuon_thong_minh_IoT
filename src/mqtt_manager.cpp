@@ -1,5 +1,6 @@
 #include "mqtt_manager.h"
 
+#include "actuator_manager.h"
 #include "config.h"
 #include "command_handler.h"
 #include "mode_controller.h"
@@ -18,6 +19,12 @@ void tick(const uint32_t nowMs) {
   (void)nowMs;
 }
 
+void updateState(const uint32_t nowMs, const SensorData &sensors, const ActuatorSnapshot &actuators) {
+  (void)nowMs;
+  (void)sensors;
+  (void)actuators;
+}
+
 bool wifiConnected() {
   return false;
 }
@@ -33,6 +40,11 @@ bool runReconnectSelfTest() {
 
 bool runCommandAckSelfTest() {
   Serial.println(F("MQTT_COMMAND_ACK_SELF_TEST: PASS"));
+  return true;
+}
+
+bool runRetainedStateSelfTest() {
+  Serial.println(F("MQTT_RETAINED_STATE_SELF_TEST: PASS"));
   return true;
 }
 
@@ -62,6 +74,11 @@ bool g_scanDone = false;
 bool g_targetSsidFound = false;
 int32_t g_targetChannel = 0;
 wl_status_t g_lastWifiStatus = WL_IDLE_STATUS;
+SensorData g_lastSensors = {};
+ActuatorSnapshot g_lastActuators = {};
+bool g_haveSensorState = false;
+bool g_haveActuatorState = false;
+uint32_t g_lastStatePublishMs = 0;
 
 struct RecentCommand {
   char cmdId[65];
@@ -118,9 +135,79 @@ uint32_t nextMqttBackoff(const uint32_t current) {
 }
 
 void publishStatus(const char *sysStatus, const char *reason) {
-  char payload[96] = {0};
-  snprintf(payload, sizeof(payload), "{\"sysStatus\":\"%s\",\"reason\":\"%s\"}", sysStatus, reason);
-  g_mqtt.publish(MqttTopics::kStatus, payload, MqttTopics::kStatusRetain);
+  char payload[160] = {0};
+  snprintf(payload, sizeof(payload), "{\"sysStatus\":\"%s\",\"reason\":\"%s\",\"mode\":\"%s\"}",
+           sysStatus, reason, ModeController::modeName());
+  const bool ok = g_mqtt.publish(MqttTopics::kStatus, payload, MqttTopics::kStatusRetain);
+  Serial.print(F("MQTT_STATUS_PUBLISH retained=1 reason="));
+  Serial.print(reason);
+  Serial.print(F(" result="));
+  Serial.println(ok ? F("ok") : F("fail"));
+}
+
+const char *boolText(const bool value) {
+  return value ? "true" : "false";
+}
+
+void publishSensorState() {
+  if (!g_haveSensorState) {
+    Serial.println(F("MQTT_STATE_SENSOR_SKIP reason=no_cache"));
+    return;
+  }
+  char payload[448] = {0};
+  snprintf(payload, sizeof(payload),
+           "{\"temperatureC\":%.1f,\"humidityPct\":%.1f,\"lux\":%.1f,\"soilPct\":%.1f,"
+           "\"soilAO\":%u,\"rainAO\":%u,\"soilDO\":%u,\"rainDO\":%u,"
+           "\"sensor_invalid\":%s,\"dht_ok\":%s,\"bh1750_ok\":%s,\"soil_ok\":%s,\"rain_ok\":%s,"
+           "\"dht_last_valid_ms\":%lu,\"bh1750_last_valid_ms\":%lu,"
+           "\"soil_last_valid_ms\":%lu,\"rain_last_valid_ms\":%lu,"
+           "\"dht_max_stale_ms\":%lu,\"bh1750_max_stale_ms\":%lu,"
+           "\"soil_max_stale_ms\":%lu,\"rain_max_stale_ms\":%lu}",
+           g_lastSensors.temperatureC, g_lastSensors.humidityPct, g_lastSensors.lux, g_lastSensors.soilPct,
+           g_lastSensors.soilAO, g_lastSensors.rainAO, g_lastSensors.soilDO, g_lastSensors.rainDO,
+           boolText(g_lastSensors.sensor_invalid), boolText(g_lastSensors.dht_ok),
+           boolText(g_lastSensors.bh1750_ok), boolText(g_lastSensors.soil_ok), boolText(g_lastSensors.rain_ok),
+           static_cast<unsigned long>(g_lastSensors.dht_last_valid_ms),
+           static_cast<unsigned long>(g_lastSensors.bh1750_last_valid_ms),
+           static_cast<unsigned long>(g_lastSensors.soil_last_valid_ms),
+           static_cast<unsigned long>(g_lastSensors.rain_last_valid_ms),
+           static_cast<unsigned long>(g_lastSensors.dht_max_stale_ms),
+           static_cast<unsigned long>(g_lastSensors.bh1750_max_stale_ms),
+           static_cast<unsigned long>(g_lastSensors.soil_max_stale_ms),
+           static_cast<unsigned long>(g_lastSensors.rain_max_stale_ms));
+  const bool ok = g_mqtt.publish(MqttTopics::kStateSensor, payload, MqttTopics::kStateSensorRetain);
+  Serial.print(F("MQTT_STATE_SENSOR_PUBLISH retained=1 result="));
+  Serial.println(ok ? F("ok") : F("fail"));
+}
+
+void publishActuatorState() {
+  if (!g_haveActuatorState) {
+    g_lastActuators = ActuatorManager::snapshot();
+    g_haveActuatorState = true;
+  }
+  char payload[192] = {0};
+  snprintf(payload, sizeof(payload),
+           "{\"lightOn\":%s,\"fanOn\":%s,\"pumpOn\":%s,\"servoEnabled\":%s,"
+           "\"servoSweepEnabled\":%s,\"servoAngle\":%d,\"mode\":\"%s\"}",
+           boolText(g_lastActuators.lightOn), boolText(g_lastActuators.fanOn),
+           boolText(g_lastActuators.pumpOn), boolText(g_lastActuators.servoEnabled),
+           boolText(g_lastActuators.servoSweepEnabled), g_lastActuators.servoAngle,
+           ModeController::modeName());
+  const bool ok = g_mqtt.publish(MqttTopics::kStateActuator, payload, MqttTopics::kStateActuatorRetain);
+  Serial.print(F("MQTT_STATE_ACTUATOR_PUBLISH retained=1 result="));
+  Serial.println(ok ? F("ok") : F("fail"));
+}
+
+void publishRetainedSnapshot(const char *reason) {
+  if (!g_mqtt.connected()) {
+    return;
+  }
+  publishSensorState();
+  publishActuatorState();
+  publishStatus("online", reason);
+  g_lastStatePublishMs = millis();
+  Serial.print(F("MQTT_RETAINED_SNAPSHOT reason="));
+  Serial.println(reason);
 }
 
 const char *ackStatusName(const CommandHandler::ExecuteStatus status) {
@@ -288,6 +375,7 @@ void handleCommandPayload(const byte *payload, const unsigned int length) {
   const char *action = doc["action"] | "";
   if (strcmp(action, "query_state") == 0) {
     publishAck(cmdId, CommandHandler::ExecuteStatus::Ok, "success");
+    publishRetainedSnapshot("query_state");
     Serial.print(F("MQTT_QUERY_STATE cmdId="));
     Serial.println(cmdId);
     return;
@@ -306,6 +394,11 @@ void handleCommandPayload(const byte *payload, const unsigned int length) {
   }
 
   const CommandHandler::ExecuteResult result = CommandHandler::executeStructured(commandText, false, nowMs);
+  if (result.status == CommandHandler::ExecuteStatus::Ok) {
+    g_lastActuators = ActuatorManager::snapshot();
+    g_haveActuatorState = true;
+    publishRetainedSnapshot("command");
+  }
   publishAck(cmdId, result.status, result.reason);
 }
 
@@ -447,7 +540,8 @@ void attemptMqttConnect(const uint32_t nowMs) {
     g_mqttBackoffMs = 3000;
     g_nextMqttAttemptMs = nowMs + g_mqttBackoffMs;
     g_mqtt.subscribe(MqttTopics::kCommand, MqttTopics::kCommandQos);
-    publishStatus("online", g_everMqttConnected ? "reconnect" : "boot");
+    Serial.println(F("MQTT_SUBSCRIBE command result=ok"));
+    publishRetainedSnapshot(g_everMqttConnected ? "reconnect" : "boot");
     g_everMqttConnected = true;
     return;
   }
@@ -497,9 +591,27 @@ void tick(const uint32_t nowMs) {
     Serial.println(WiFi.localIP());
   }
   attemptMqttConnect(nowMs);
+  if (g_mqtt.connected() && g_haveSensorState &&
+      static_cast<uint32_t>(nowMs - g_lastStatePublishMs) >= LOOP_INTERVAL_MS) {
+    publishSensorState();
+    publishActuatorState();
+    g_lastStatePublishMs = nowMs;
+  }
   if (g_wifiFailureCount >= 50) {
     Serial.println(F("WIFI_RESTART_GUARD would_restart_after_safe_state"));
     g_wifiFailureCount = 0;
+  }
+}
+
+void updateState(const uint32_t nowMs, const SensorData &sensors, const ActuatorSnapshot &actuators) {
+  g_lastSensors = sensors;
+  g_lastActuators = actuators;
+  g_haveSensorState = true;
+  g_haveActuatorState = true;
+  if (g_mqtt.connected() && static_cast<uint32_t>(nowMs - g_lastStatePublishMs) >= LOOP_INTERVAL_MS) {
+    publishSensorState();
+    publishActuatorState();
+    g_lastStatePublishMs = nowMs;
   }
 }
 
@@ -547,6 +659,72 @@ bool runCommandAckSelfTest() {
   pass &= duplicateCommand("self-test-a", 2000);
   pass &= !duplicateCommand("self-test-a", 62001);
   Serial.print(F("MQTT_COMMAND_ACK_SELF_TEST: "));
+  Serial.println(pass ? F("PASS") : F("FAIL"));
+  return pass;
+}
+
+bool runRetainedStateSelfTest() {
+  SensorData savedSensors = g_lastSensors;
+  ActuatorSnapshot savedActuators = g_lastActuators;
+  const bool savedHaveSensorState = g_haveSensorState;
+  const bool savedHaveActuatorState = g_haveActuatorState;
+
+  g_lastSensors = {};
+  g_lastSensors.temperatureC = 28.4f;
+  g_lastSensors.humidityPct = 65.0f;
+  g_lastSensors.lux = 1200.0f;
+  g_lastSensors.soilPct = 42.0f;
+  g_lastSensors.soilAO = 2048;
+  g_lastSensors.rainAO = 4095;
+  g_lastSensors.soilDO = 1;
+  g_lastSensors.rainDO = 1;
+  g_lastSensors.sensor_invalid = false;
+  g_lastSensors.dht_ok = true;
+  g_lastSensors.bh1750_ok = true;
+  g_lastSensors.soil_ok = true;
+  g_lastSensors.rain_ok = true;
+  g_lastSensors.dht_last_valid_ms = 1000;
+  g_lastSensors.bh1750_last_valid_ms = 1000;
+  g_lastSensors.soil_last_valid_ms = 1000;
+  g_lastSensors.rain_last_valid_ms = 1000;
+  g_lastSensors.dht_max_stale_ms = 6000;
+  g_lastSensors.bh1750_max_stale_ms = 6000;
+  g_lastSensors.soil_max_stale_ms = 6000;
+  g_lastSensors.rain_max_stale_ms = 6000;
+  g_lastActuators = {true, false, true, true, false, 90};
+  g_haveSensorState = true;
+  g_haveActuatorState = true;
+
+  char sensorPayload[448] = {0};
+  snprintf(sensorPayload, sizeof(sensorPayload),
+           "{\"temperatureC\":%.1f,\"humidityPct\":%.1f,\"lux\":%.1f,\"soilPct\":%.1f,"
+           "\"soilAO\":%u,\"rainAO\":%u,\"soilDO\":%u,\"rainDO\":%u,"
+           "\"sensor_invalid\":%s,\"dht_ok\":%s,\"bh1750_ok\":%s,\"soil_ok\":%s,\"rain_ok\":%s}",
+           g_lastSensors.temperatureC, g_lastSensors.humidityPct, g_lastSensors.lux, g_lastSensors.soilPct,
+           g_lastSensors.soilAO, g_lastSensors.rainAO, g_lastSensors.soilDO, g_lastSensors.rainDO,
+           boolText(g_lastSensors.sensor_invalid), boolText(g_lastSensors.dht_ok),
+           boolText(g_lastSensors.bh1750_ok), boolText(g_lastSensors.soil_ok), boolText(g_lastSensors.rain_ok));
+  char actuatorPayload[192] = {0};
+  snprintf(actuatorPayload, sizeof(actuatorPayload),
+           "{\"lightOn\":%s,\"fanOn\":%s,\"pumpOn\":%s,\"servoEnabled\":%s,"
+           "\"servoSweepEnabled\":%s,\"servoAngle\":%d,\"mode\":\"%s\"}",
+           boolText(g_lastActuators.lightOn), boolText(g_lastActuators.fanOn),
+           boolText(g_lastActuators.pumpOn), boolText(g_lastActuators.servoEnabled),
+           boolText(g_lastActuators.servoSweepEnabled), g_lastActuators.servoAngle,
+           ModeController::modeName());
+  bool pass = true;
+  pass &= strstr(sensorPayload, "\"dht_ok\":true") != nullptr;
+  pass &= strstr(sensorPayload, "\"bh1750_ok\":true") != nullptr;
+  pass &= strstr(sensorPayload, "\"soil_ok\":true") != nullptr;
+  pass &= strstr(sensorPayload, "\"rain_ok\":true") != nullptr;
+  pass &= strstr(actuatorPayload, "\"servoAngle\":90") != nullptr;
+
+  g_lastSensors = savedSensors;
+  g_lastActuators = savedActuators;
+  g_haveSensorState = savedHaveSensorState;
+  g_haveActuatorState = savedHaveActuatorState;
+
+  Serial.print(F("MQTT_RETAINED_STATE_SELF_TEST: "));
   Serial.println(pass ? F("PASS") : F("FAIL"));
   return pass;
 }

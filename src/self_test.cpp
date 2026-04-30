@@ -30,6 +30,7 @@ bool g_lcdFormatterSelfTestPass = false;
 bool g_autoLogicSelfTestPass = false;
 bool g_mqttReconnectSelfTestPass = false;
 bool g_mqttCommandAckSelfTestPass = false;
+bool g_mqttRetainedStateSelfTestPass = false;
 
 bool reportTestStep(const char *group, const char *step, const bool pass) {
   Serial.print(group);
@@ -160,6 +161,7 @@ bool run(const CommandExecutor executeCommand) {
   g_autoLogicSelfTestPass = AutoLogic::runSelfTest();
   g_mqttReconnectSelfTestPass = MqttManager::runReconnectSelfTest();
   g_mqttCommandAckSelfTestPass = MqttManager::runCommandAckSelfTest();
+  g_mqttRetainedStateSelfTestPass = MqttManager::runRetainedStateSelfTest();
   g_lcdFormatterSelfTestPass = runLcdFormatterSelfTest();
   Serial.print(F("LCD_DEVICE_SELF_TEST: "));
   Serial.println(lcdDeviceAvailable() ? F("READY") : F("NOT_READY"));
@@ -170,7 +172,8 @@ bool run(const CommandExecutor executeCommand) {
                        g_actuatorSafetySelfTestPass && g_sensorPolicySelfTestPass &&
                        g_commandHandlerSelfTestPass && g_modeFsmSelfTestPass &&
                        g_autoLogicSelfTestPass && g_mqttReconnectSelfTestPass &&
-                       g_mqttCommandAckSelfTestPass && g_lcdFormatterSelfTestPass;
+                       g_mqttCommandAckSelfTestPass && g_mqttRetainedStateSelfTestPass &&
+                       g_lcdFormatterSelfTestPass;
   Serial.print(F("SELF_TEST: "));
   Serial.println(allPass ? F("PASS") : F("FAIL"));
   return allPass;
