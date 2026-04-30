@@ -1,6 +1,8 @@
 #include "mqtt_manager.h"
 
 #include "config.h"
+#include "command_handler.h"
+#include "mode_controller.h"
 #include "mqtt_topics.h"
 
 #if APP_MODE_SIMULATOR
@@ -29,10 +31,16 @@ bool runReconnectSelfTest() {
   return true;
 }
 
+bool runCommandAckSelfTest() {
+  Serial.println(F("MQTT_COMMAND_ACK_SELF_TEST: PASS"));
+  return true;
+}
+
 }  // namespace MqttManager
 
 #else
 
+#include <ArduinoJson.h>
 #include <PubSubClient.h>
 #include <WiFi.h>
 
@@ -54,6 +62,14 @@ bool g_scanDone = false;
 bool g_targetSsidFound = false;
 int32_t g_targetChannel = 0;
 wl_status_t g_lastWifiStatus = WL_IDLE_STATUS;
+
+struct RecentCommand {
+  char cmdId[65];
+  uint32_t seenMs;
+};
+
+RecentCommand g_recentCommands[16] = {};
+uint8_t g_recentCommandWrite = 0;
 
 const __FlashStringHelper *encryptionName(const wifi_auth_mode_t enc) {
   switch (enc) {
@@ -107,12 +123,200 @@ void publishStatus(const char *sysStatus, const char *reason) {
   g_mqtt.publish(MqttTopics::kStatus, payload, MqttTopics::kStatusRetain);
 }
 
+const char *ackStatusName(const CommandHandler::ExecuteStatus status) {
+  switch (status) {
+    case CommandHandler::ExecuteStatus::Ok:
+      return "ok";
+    case CommandHandler::ExecuteStatus::Rejected:
+      return "rejected";
+    case CommandHandler::ExecuteStatus::Error:
+      return "error";
+  }
+  return "error";
+}
+
+void publishAck(const char *cmdId, const CommandHandler::ExecuteStatus status, const char *reason) {
+  char payload[192] = {0};
+  snprintf(payload, sizeof(payload),
+           "{\"cmdId\":\"%s\",\"status\":\"%s\",\"reason\":\"%s\",\"mode\":\"%s\"}", cmdId,
+           ackStatusName(status), reason, ModeController::modeName());
+  const bool ok = g_mqtt.publish(MqttTopics::kCommandAck, payload, MqttTopics::kCommandAckRetain);
+  Serial.print(F("MQTT_ACK_PUBLISH cmdId="));
+  Serial.print(cmdId);
+  Serial.print(F(" status="));
+  Serial.print(ackStatusName(status));
+  Serial.print(F(" reason="));
+  Serial.print(reason);
+  Serial.print(F(" mode="));
+  Serial.print(ModeController::modeName());
+  Serial.print(F(" result="));
+  Serial.println(ok ? F("ok") : F("fail"));
+}
+
+bool duplicateCommand(const char *cmdId, const uint32_t nowMs) {
+  static constexpr uint32_t kDuplicateWindowMs = 60000;
+  for (const RecentCommand &recent : g_recentCommands) {
+    if (recent.cmdId[0] == '\0') {
+      continue;
+    }
+    if (static_cast<uint32_t>(nowMs - recent.seenMs) > kDuplicateWindowMs) {
+      continue;
+    }
+    if (strcmp(recent.cmdId, cmdId) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void rememberCommand(const char *cmdId, const uint32_t nowMs) {
+  strncpy(g_recentCommands[g_recentCommandWrite].cmdId, cmdId,
+          sizeof(g_recentCommands[g_recentCommandWrite].cmdId) - 1);
+  g_recentCommands[g_recentCommandWrite].cmdId[sizeof(g_recentCommands[g_recentCommandWrite].cmdId) - 1] = '\0';
+  g_recentCommands[g_recentCommandWrite].seenMs = nowMs;
+  g_recentCommandWrite = static_cast<uint8_t>((g_recentCommandWrite + 1) % 16);
+}
+
+bool boolValue(JsonVariantConst value, bool *out) {
+  if (value.is<bool>()) {
+    *out = value.as<bool>();
+    return true;
+  }
+  if (value.is<const char *>()) {
+    const char *text = value.as<const char *>();
+    if (strcasecmp(text, "on") == 0 || strcasecmp(text, "true") == 0 || strcmp(text, "1") == 0) {
+      *out = true;
+      return true;
+    }
+    if (strcasecmp(text, "off") == 0 || strcasecmp(text, "false") == 0 || strcmp(text, "0") == 0) {
+      *out = false;
+      return true;
+    }
+  }
+  return false;
+}
+
+bool buildCommandText(JsonDocument &doc, char *out, const size_t outSize) {
+  const char *action = doc["action"] | "";
+  if (strcmp(action, "set_mode") == 0) {
+    const char *value = doc["value"] | "";
+    if (strcasecmp(value, "manual") == 0) {
+      strncpy(out, "mode manual", outSize - 1);
+      return true;
+    }
+    if (strcasecmp(value, "auto") == 0) {
+      strncpy(out, "mode auto", outSize - 1);
+      return true;
+    }
+    return false;
+  }
+
+  if (strcmp(action, "set_actuator") != 0) {
+    return false;
+  }
+
+  const char *target = doc["target"] | "";
+  if (strcasecmp(target, "roof") == 0 || strcasecmp(target, "servo") == 0) {
+    if (doc["value"].is<int>()) {
+      const int angle = doc["value"].as<int>();
+      if (angle == 0 || angle == 90 || angle == 180) {
+        snprintf(out, outSize, "servo %d", angle);
+        return true;
+      }
+    }
+    bool on = false;
+    if (!boolValue(doc["value"], &on)) {
+      return false;
+    }
+    snprintf(out, outSize, "servo %s", on ? "on" : "off");
+    return true;
+  }
+
+  bool on = false;
+  if (!boolValue(doc["value"], &on)) {
+    return false;
+  }
+  if (strcasecmp(target, "light") == 0) {
+    snprintf(out, outSize, "light %s", on ? "on" : "off");
+    return true;
+  }
+  if (strcasecmp(target, "fan") == 0) {
+    snprintf(out, outSize, "fan %s", on ? "on" : "off");
+    return true;
+  }
+  if (strcasecmp(target, "pump") == 0) {
+    snprintf(out, outSize, "pump %s", on ? "on" : "off");
+    return true;
+  }
+  return false;
+}
+
+void handleCommandPayload(const byte *payload, const unsigned int length) {
+  if (length > MAX_MQTT_PAYLOAD_BYTES) {
+    StaticJsonDocument<128> smallDoc;
+    const DeserializationError smallErr = deserializeJson(smallDoc, payload, length);
+    const char *oversizedCmdId = smallErr ? "" : (smallDoc["cmdId"] | "");
+    if (oversizedCmdId[0] != '\0') {
+      publishAck(oversizedCmdId, CommandHandler::ExecuteStatus::Rejected, "invalid_payload");
+    } else {
+      Serial.println(F("MQTT_CMD_DROP reason=oversized_no_cmdId"));
+    }
+    return;
+  }
+
+  StaticJsonDocument<384> doc;
+  const DeserializationError err = deserializeJson(doc, payload, length);
+  if (err) {
+    Serial.print(F("MQTT_CMD_REJECT reason=invalid_payload parse="));
+    Serial.println(err.c_str());
+    return;
+  }
+
+  const char *cmdId = doc["cmdId"] | "";
+  if (cmdId[0] == '\0' || strlen(cmdId) > 64) {
+    Serial.println(F("MQTT_CMD_REJECT reason=invalid_payload cmdId"));
+    return;
+  }
+
+  const uint32_t nowMs = millis();
+  if (duplicateCommand(cmdId, nowMs)) {
+    publishAck(cmdId, CommandHandler::ExecuteStatus::Rejected, "duplicate_cmdId");
+    return;
+  }
+  rememberCommand(cmdId, nowMs);
+
+  const char *action = doc["action"] | "";
+  if (strcmp(action, "query_state") == 0) {
+    publishAck(cmdId, CommandHandler::ExecuteStatus::Ok, "success");
+    Serial.print(F("MQTT_QUERY_STATE cmdId="));
+    Serial.println(cmdId);
+    return;
+  }
+  if (strcmp(action, "reboot") == 0) {
+    publishAck(cmdId, CommandHandler::ExecuteStatus::Ok, "success");
+    Serial.print(F("MQTT_REBOOT_ACCEPTED cmdId="));
+    Serial.println(cmdId);
+    return;
+  }
+
+  char commandText[48] = {0};
+  if (!buildCommandText(doc, commandText, sizeof(commandText))) {
+    publishAck(cmdId, CommandHandler::ExecuteStatus::Rejected, "unknown_command");
+    return;
+  }
+
+  const CommandHandler::ExecuteResult result = CommandHandler::executeStructured(commandText, false, nowMs);
+  publishAck(cmdId, result.status, result.reason);
+}
+
 void onMqttMessage(char *topic, byte *payload, unsigned int length) {
-  (void)payload;
   Serial.print(F("MQTT_RX topic="));
   Serial.print(topic);
   Serial.print(F(" bytes="));
   Serial.println(length);
+  if (strcmp(topic, MqttTopics::kCommand) == 0) {
+    handleCommandPayload(payload, length);
+  }
 }
 
 void tickWifiScan() {
@@ -319,6 +523,30 @@ bool runReconnectSelfTest() {
   pass &= nextMqttBackoff(12000) == 30000;
   pass &= nextMqttBackoff(30000) == 30000;
   Serial.print(F("MQTT_RECONNECT_SELF_TEST: "));
+  Serial.println(pass ? F("PASS") : F("FAIL"));
+  return pass;
+}
+
+bool runCommandAckSelfTest() {
+  bool pass = true;
+  StaticJsonDocument<128> doc;
+  doc["action"] = "set_mode";
+  doc["value"] = "manual";
+  char commandText[48] = {0};
+  pass &= buildCommandText(doc, commandText, sizeof(commandText));
+  pass &= strcmp(commandText, "mode manual") == 0;
+  doc.clear();
+  doc["action"] = "set_actuator";
+  doc["target"] = "light";
+  doc["value"] = "on";
+  memset(commandText, 0, sizeof(commandText));
+  pass &= buildCommandText(doc, commandText, sizeof(commandText));
+  pass &= strcmp(commandText, "light on") == 0;
+  pass &= !duplicateCommand("self-test-a", 1000);
+  rememberCommand("self-test-a", 1000);
+  pass &= duplicateCommand("self-test-a", 2000);
+  pass &= !duplicateCommand("self-test-a", 62001);
+  Serial.print(F("MQTT_COMMAND_ACK_SELF_TEST: "));
   Serial.println(pass ? F("PASS") : F("FAIL"));
   return pass;
 }

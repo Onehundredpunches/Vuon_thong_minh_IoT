@@ -10,6 +10,7 @@ void tick(uint32_t nowMs);
 bool wifiConnected();
 bool mqttConnected();
 bool runReconnectSelfTest();
+bool runCommandAckSelfTest();
 
 }  // namespace MqttManager
 

@@ -302,6 +302,148 @@ void handleInternal(char *cmd, const bool bypassModeGate) {
   }
 }
 
+ExecuteResult executeParsed(const ParsedCommand &parsed, const char *cmd, const bool bypassModeGate,
+                            const uint32_t nowMs, const bool printSerial) {
+  if (parsed.kind == CommandKind::Unknown) {
+    if (printSerial) {
+      Serial.println(F("CMD: UNKNOWN"));
+    }
+    return {ExecuteStatus::Rejected, "unknown_command"};
+  }
+
+  if (parsed.kind == CommandKind::SetModeManual) {
+    if (!ModeController::setManual("command", nowMs)) {
+      if (printSerial) {
+        printModeReject(cmd, "invalid_transition");
+      }
+      return {ExecuteStatus::Rejected, "invalid_transition"};
+    }
+    if (printSerial) {
+      printModeAck(cmd);
+    }
+    return {ExecuteStatus::Ok, "success"};
+  }
+  if (parsed.kind == CommandKind::SetModeAuto) {
+    if (!ModeController::setAuto("command", nowMs)) {
+      if (printSerial) {
+        printModeReject(cmd, "invalid_transition");
+      }
+      return {ExecuteStatus::Rejected, "invalid_transition"};
+    }
+    if (printSerial) {
+      printModeAck(cmd);
+    }
+    return {ExecuteStatus::Ok, "success"};
+  }
+
+  if (!bypassModeGate && isActuatorCommand(parsed.kind)) {
+    const char *rejectReason = nullptr;
+    if (!ModeController::actuatorCommandAllowed(&rejectReason)) {
+      if (printSerial) {
+        printModeReject(cmd, rejectReason);
+      }
+      return {ExecuteStatus::Rejected, rejectReason};
+    }
+    ModeController::noteManualActivity(nowMs);
+  }
+
+  ActuatorCommandStatus status = ActuatorCommandStatus::Ok;
+  switch (parsed.kind) {
+    case CommandKind::ServoOff:
+      ActuatorManager::setServoOnOff(false);
+      if (printSerial) {
+        ActuatorManager::printServoAck(cmd);
+      }
+      return {ExecuteStatus::Ok, "success"};
+    case CommandKind::ServoOn:
+      ActuatorManager::setServoOnOff(true);
+      if (printSerial) {
+        ActuatorManager::printServoAck(cmd);
+      }
+      return {ExecuteStatus::Ok, "success"};
+    case CommandKind::ServoSweepOn:
+      status = ActuatorManager::requestServoSweep(true, nowMs);
+      break;
+    case CommandKind::ServoSweepOff:
+      status = ActuatorManager::requestServoSweep(false, nowMs);
+      break;
+    case CommandKind::ServoAngle:
+      status = ActuatorManager::requestServoAngleCommand(parsed.servoAngle, nowMs);
+      break;
+    case CommandKind::LightOn:
+      status = ActuatorManager::requestLight(true, nowMs);
+      break;
+    case CommandKind::LightOff:
+      status = ActuatorManager::requestLight(false, nowMs);
+      break;
+    case CommandKind::LightToggle:
+      status = ActuatorManager::requestLight(!ActuatorManager::lightOn(), nowMs);
+      break;
+    case CommandKind::LightBlink:
+      status = ActuatorManager::requestLightBlink(nowMs);
+      break;
+    case CommandKind::FanOn:
+      status = ActuatorManager::requestFan(true, nowMs);
+      break;
+    case CommandKind::FanOff:
+      status = ActuatorManager::requestFan(false, nowMs);
+      break;
+    case CommandKind::PumpOn:
+      status = ActuatorManager::requestPump(true, nowMs);
+      break;
+    case CommandKind::PumpOff:
+      status = ActuatorManager::requestPump(false, nowMs);
+      break;
+    case CommandKind::SetModeAuto:
+    case CommandKind::SetModeManual:
+    case CommandKind::Unknown:
+      return {ExecuteStatus::Rejected, "unknown_command"};
+  }
+
+  if (status != ActuatorCommandStatus::Ok) {
+    if (printSerial) {
+      ActuatorManager::printCommandReject(cmd, status);
+    }
+    if (status == ActuatorCommandStatus::CooldownActive) {
+      return {ExecuteStatus::Rejected, "cooldown_active"};
+    }
+    if (status == ActuatorCommandStatus::InterlockViolation) {
+      return {ExecuteStatus::Rejected, "interlock_violation"};
+    }
+    return {ExecuteStatus::Error, "internal_error"};
+  }
+
+  if (printSerial) {
+    switch (parsed.kind) {
+      case CommandKind::ServoSweepOn:
+      case CommandKind::ServoSweepOff:
+      case CommandKind::ServoAngle:
+        ActuatorManager::printServoAck(cmd);
+        break;
+      case CommandKind::LightOn:
+      case CommandKind::LightOff:
+      case CommandKind::LightToggle:
+      case CommandKind::LightBlink:
+        ActuatorManager::printRelayCommandLog(cmd, "LIGHT", PIN_RELAY_LIGHT, ActuatorManager::lightOn());
+        ActuatorManager::printLightState();
+        break;
+      case CommandKind::FanOn:
+      case CommandKind::FanOff:
+        ActuatorManager::printRelayCommandLog(cmd, "FAN", PIN_RELAY_FAN, ActuatorManager::fanOn());
+        ActuatorManager::printFanState();
+        break;
+      case CommandKind::PumpOn:
+      case CommandKind::PumpOff:
+        ActuatorManager::printRelayCommandLog(cmd, "PUMP", PIN_RELAY_PUMP, ActuatorManager::pumpOn());
+        ActuatorManager::printPumpState();
+        break;
+      default:
+        break;
+    }
+  }
+  return {ExecuteStatus::Ok, "success"};
+}
+
 void handle(char *cmd) {
   handleInternal(cmd, false);
 }
@@ -310,6 +452,17 @@ void executeForTest(const char *cmd) {
   char local[48] = {0};
   strncpy(local, cmd, sizeof(local) - 1);
   handleInternal(local, true);
+}
+
+ExecuteResult executeStructured(const char *cmd, const bool bypassModeGate, const unsigned long nowMs) {
+  char local[48] = {0};
+  strncpy(local, cmd, sizeof(local) - 1);
+  normalize(local);
+  if (local[0] == '\0') {
+    return {ExecuteStatus::Rejected, "unknown_command"};
+  }
+  const ParsedCommand parsed = parseCommand(local);
+  return executeParsed(parsed, local, bypassModeGate, static_cast<uint32_t>(nowMs), false);
 }
 
 bool runParserSelfTest() {
