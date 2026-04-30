@@ -16,6 +16,7 @@
 #include "command_handler.h"
 #include "mode_controller.h"
 #include "auto_logic.h"
+#include "mqtt_manager.h"
 
 namespace {
 
@@ -71,6 +72,7 @@ void setup() {
   ActuatorManager::begin();
   ModeController::begin(millis());
   AutoLogic::begin(millis());
+  MqttManager::begin(millis());
 
   printStartup();
   ActuatorManager::printLightState();
@@ -99,6 +101,7 @@ void loop() {
   ActuatorManager::updateLightBlink(now);
   ActuatorManager::tickSafety(now);
   ModeController::tick(millis());
+  MqttManager::tick(millis());
 
   if (static_cast<int32_t>(now - g_nextSampleMs) < 0) {
     return;
@@ -113,8 +116,8 @@ void loop() {
   lcdState.sensors = data;
   lcdState.actuators = ActuatorManager::snapshot();
   lcdState.mode = ModeController::mode();
-  lcdState.wifiOk = false;
-  lcdState.mqttOk = false;
+  lcdState.wifiOk = MqttManager::wifiConnected();
+  lcdState.mqttOk = MqttManager::mqttConnected();
   lcdState.controlOwner = AutoLogic::controlOwner();
   updateLcd(now, lcdState);
 

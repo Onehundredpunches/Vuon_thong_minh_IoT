@@ -46,4 +46,12 @@ static constexpr float AUTO_LIGHT_OFF_LUX = 8000.0f;
 static constexpr int AUTO_ROOF_OPEN_ANGLE = 90;
 static constexpr int AUTO_ROOF_SAFE_ANGLE = 0;
 
+static constexpr const char *WIFI_PRIMARY_SSID = "Trang 72";
+static constexpr const char *WIFI_PRIMARY_PASSWORD = "79797979";
+static constexpr const char *MQTT_DEMO_HOST = "broker.hivemq.com";
+static constexpr uint16_t MQTT_DEMO_PORT = 1883;
+static constexpr const char *MQTT_DEMO_CLIENT_ID = "vuon-iot1";
+static constexpr uint16_t MQTT_KEEP_ALIVE_SECONDS = 30;
+static constexpr size_t MAX_MQTT_PAYLOAD_BYTES = 512;
+
 #endif

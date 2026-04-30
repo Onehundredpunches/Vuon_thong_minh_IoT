@@ -8,6 +8,7 @@
 #include "config.h"
 #include "lcd_display.h"
 #include "mode_controller.h"
+#include "mqtt_manager.h"
 #include "sensor_manager.h"
 
 namespace SelfTest {
@@ -27,6 +28,7 @@ bool g_commandHandlerSelfTestPass = false;
 bool g_modeFsmSelfTestPass = false;
 bool g_lcdFormatterSelfTestPass = false;
 bool g_autoLogicSelfTestPass = false;
+bool g_mqttReconnectSelfTestPass = false;
 
 bool reportTestStep(const char *group, const char *step, const bool pass) {
   Serial.print(group);
@@ -155,6 +157,7 @@ bool run(const CommandExecutor executeCommand) {
   g_commandHandlerSelfTestPass = CommandHandler::runParserSelfTest();
   g_modeFsmSelfTestPass = ModeController::runSelfTest();
   g_autoLogicSelfTestPass = AutoLogic::runSelfTest();
+  g_mqttReconnectSelfTestPass = MqttManager::runReconnectSelfTest();
   g_lcdFormatterSelfTestPass = runLcdFormatterSelfTest();
   Serial.print(F("LCD_DEVICE_SELF_TEST: "));
   Serial.println(lcdDeviceAvailable() ? F("READY") : F("NOT_READY"));
@@ -164,7 +167,8 @@ bool run(const CommandExecutor executeCommand) {
   const bool allPass = g_pinMapSelfTestPass && g_relaySelfTestPass && g_servoSelfTestPass &&
                        g_actuatorSafetySelfTestPass && g_sensorPolicySelfTestPass &&
                        g_commandHandlerSelfTestPass && g_modeFsmSelfTestPass &&
-                       g_autoLogicSelfTestPass && g_lcdFormatterSelfTestPass;
+                       g_autoLogicSelfTestPass && g_mqttReconnectSelfTestPass &&
+                       g_lcdFormatterSelfTestPass;
   Serial.print(F("SELF_TEST: "));
   Serial.println(allPass ? F("PASS") : F("FAIL"));
   return allPass;
