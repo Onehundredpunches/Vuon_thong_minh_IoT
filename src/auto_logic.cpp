@@ -14,6 +14,9 @@ uint8_t g_lightOnConfirm = 0;
 uint8_t g_lightOffConfirm = 0;
 uint32_t g_pumpLastOnMs = 0;
 uint32_t g_pumpLastOffMs = 0;
+uint32_t g_pumpInvalidSinceMs = 0;
+bool g_pumpInvalidHoldLogged = false;
+bool g_pumpInvalidForceLogged = false;
 enum class RoofState { Open, Closed };
 
 RoofState g_roofState = RoofState::Closed;
@@ -24,6 +27,7 @@ static constexpr uint8_t AUTO_CONFIRM_SAMPLES = 2;
 static constexpr uint32_t ROOF_MIN_COMMAND_INTERVAL_MS = 800;
 static constexpr uint32_t AUTO_PUMP_MIN_ON_MS = 30000;
 static constexpr uint32_t AUTO_PUMP_MIN_OFF_MS = 10000;
+static constexpr uint32_t AUTO_PUMP_SOIL_INVALID_HOLD_MS = 8000;
 
 bool elapsedAtLeast(const uint32_t nowMs, const uint32_t sinceMs, const uint32_t durationMs) {
   const int32_t elapsedMs = static_cast<int32_t>(nowMs - sinceMs);
@@ -150,16 +154,32 @@ void applyPumpPolicy(const uint32_t nowMs, const SensorData &data) {
   if (!data.soil_ok) {
     g_pumpOnConfirm = 0;
     g_pumpOffConfirm = 0;
+    if (g_pumpInvalidSinceMs == 0) {
+      g_pumpInvalidSinceMs = nowMs;
+      g_pumpInvalidHoldLogged = false;
+      g_pumpInvalidForceLogged = false;
+    }
     const bool oldState = ActuatorManager::pumpOn();
+    if (!elapsedAtLeast(nowMs, g_pumpInvalidSinceMs, AUTO_PUMP_SOIL_INVALID_HOLD_MS)) {
+      if (oldState && !g_pumpInvalidHoldLogged) {
+        printPumpDecision(oldState, oldState, data, F("SOIL_INVALID_HOLD"), ActuatorCommandStatus::Ok);
+        g_pumpInvalidHoldLogged = true;
+      }
+      return;
+    }
     const ActuatorCommandStatus status = ActuatorManager::requestPump(false, nowMs);
     if (status == ActuatorCommandStatus::Ok) {
       g_pumpLastOffMs = nowMs;
     }
-    if (oldState || status != ActuatorCommandStatus::Ok) {
-      printPumpDecision(oldState, ActuatorManager::pumpOn(), data, F("SAFETY_OFF"), status);
+    if (oldState || status != ActuatorCommandStatus::Ok || !g_pumpInvalidForceLogged) {
+      printPumpDecision(oldState, ActuatorManager::pumpOn(), data, F("SOIL_INVALID_FORCE_OFF"), status);
+      g_pumpInvalidForceLogged = true;
     }
     return;
   }
+  g_pumpInvalidSinceMs = 0;
+  g_pumpInvalidHoldLogged = false;
+  g_pumpInvalidForceLogged = false;
   if (!ActuatorManager::pumpOn()) {
     g_pumpOffConfirm = 0;
     if (data.soilPct < AUTO_SOIL_PUMP_ON_PCT) {
@@ -295,6 +315,9 @@ void begin(const uint32_t nowMs) {
   g_pumpOffConfirm = 0;
   g_pumpLastOnMs = 0;
   g_pumpLastOffMs = 0;
+  g_pumpInvalidSinceMs = 0;
+  g_pumpInvalidHoldLogged = false;
+  g_pumpInvalidForceLogged = false;
   g_lightOnConfirm = 0;
   g_lightOffConfirm = 0;
 }
