@@ -46,8 +46,8 @@ static constexpr float AUTO_TEMP_FAN_ON_C = 28.0f;
 static constexpr float AUTO_TEMP_FAN_OFF_C = 24.0f;
 static constexpr float AUTO_SOIL_PUMP_ON_PCT = 35.0f;
 static constexpr float AUTO_SOIL_PUMP_OFF_PCT = 55.0f;
-static constexpr float AUTO_LIGHT_ON_LUX = 50.0f;
-static constexpr float AUTO_LIGHT_OFF_LUX = 200.0f;
+static constexpr float AUTO_LIGHT_ON_LUX = 4.0f;
+static constexpr float AUTO_LIGHT_OFF_LUX = 6.0f;
 static constexpr int AUTO_ROOF_OPEN_ANGLE = 0;
 static constexpr int AUTO_ROOF_SAFE_ANGLE = 90;
 
