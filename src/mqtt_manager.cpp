@@ -284,6 +284,28 @@ bool boolValue(JsonVariantConst value, bool *out) {
   return false;
 }
 
+bool roofValue(JsonVariantConst value, int *angleOut) {
+  if (value.is<int>()) {
+    const int angle = value.as<int>();
+    if (angle == AUTO_ROOF_OPEN_ANGLE || angle == AUTO_ROOF_SAFE_ANGLE) {
+      *angleOut = angle;
+      return true;
+    }
+  }
+  if (value.is<const char *>()) {
+    const char *text = value.as<const char *>();
+    if (strcasecmp(text, "open") == 0) {
+      *angleOut = AUTO_ROOF_OPEN_ANGLE;
+      return true;
+    }
+    if (strcasecmp(text, "close") == 0) {
+      *angleOut = AUTO_ROOF_SAFE_ANGLE;
+      return true;
+    }
+  }
+  return false;
+}
+
 bool buildCommandText(JsonDocument &doc, char *out, const size_t outSize) {
   const char *action = doc["action"] | "";
   if (strcmp(action, "set_mode") == 0) {
@@ -305,12 +327,10 @@ bool buildCommandText(JsonDocument &doc, char *out, const size_t outSize) {
 
   const char *target = doc["target"] | "";
   if (strcasecmp(target, "roof") == 0 || strcasecmp(target, "servo") == 0) {
-    if (doc["value"].is<int>()) {
-      const int angle = doc["value"].as<int>();
-      if (angle == AUTO_ROOF_OPEN_ANGLE || angle == AUTO_ROOF_SAFE_ANGLE) {
-        snprintf(out, outSize, "servo %d", angle);
-        return true;
-      }
+    int angle = 0;
+    if (roofValue(doc["value"], &angle)) {
+      snprintf(out, outSize, "servo %d", angle);
+      return true;
     }
     bool on = false;
     if (!boolValue(doc["value"], &on)) {
@@ -673,6 +693,35 @@ bool runCommandAckSelfTest() {
   memset(commandText, 0, sizeof(commandText));
   pass &= buildCommandText(doc, commandText, sizeof(commandText));
   pass &= strcmp(commandText, "light on") == 0;
+  doc["value"] = false;
+  memset(commandText, 0, sizeof(commandText));
+  pass &= buildCommandText(doc, commandText, sizeof(commandText));
+  pass &= strcmp(commandText, "light off") == 0;
+  doc["value"] = "bad";
+  pass &= !buildCommandText(doc, commandText, sizeof(commandText));
+
+  doc.clear();
+  doc["action"] = "set_actuator";
+  doc["target"] = "roof";
+  doc["value"] = "open";
+  memset(commandText, 0, sizeof(commandText));
+  pass &= buildCommandText(doc, commandText, sizeof(commandText));
+  pass &= strcmp(commandText, "servo 0") == 0;
+  doc["value"] = "close";
+  memset(commandText, 0, sizeof(commandText));
+  pass &= buildCommandText(doc, commandText, sizeof(commandText));
+  pass &= strcmp(commandText, "servo 90") == 0;
+  doc["value"] = 0;
+  memset(commandText, 0, sizeof(commandText));
+  pass &= buildCommandText(doc, commandText, sizeof(commandText));
+  pass &= strcmp(commandText, "servo 0") == 0;
+  doc["value"] = 90;
+  memset(commandText, 0, sizeof(commandText));
+  pass &= buildCommandText(doc, commandText, sizeof(commandText));
+  pass &= strcmp(commandText, "servo 90") == 0;
+  doc["value"] = "half";
+  pass &= !buildCommandText(doc, commandText, sizeof(commandText));
+
   pass &= !duplicateCommand("self-test-a", 1000);
   rememberCommand("self-test-a", 1000);
   pass &= duplicateCommand("self-test-a", 2000);
