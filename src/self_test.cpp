@@ -107,15 +107,14 @@ void runServoSelfTest(const CommandExecutor executeCommand) {
   allPass &= reportTestStep("SERVO_TEST", "servo_on", ActuatorManager::servoEnabled());
 
   executeCommand("servo sweep on");
-  allPass &= reportTestStep("SERVO_TEST", "sweep_on",
-                            ActuatorManager::servoEnabled() && ActuatorManager::servoSweepEnabled());
+  allPass &= reportTestStep("SERVO_TEST", "sweep_blocked", !ActuatorManager::servoSweepEnabled());
 
   executeCommand("servo sweep off");
   allPass &= reportTestStep("SERVO_TEST", "sweep_off", !ActuatorManager::servoSweepEnabled());
 
-  executeCommand("servo 180");
-  allPass &= reportTestStep("SERVO_TEST", "angle_180",
-                            ActuatorManager::servoAngle() == 180 && !ActuatorManager::servoSweepEnabled());
+  executeCommand("servo 90");
+  allPass &= reportTestStep("SERVO_TEST", "angle_90",
+                            ActuatorManager::servoAngle() == 90 && !ActuatorManager::servoSweepEnabled());
 
   executeCommand("servo off");
   allPass &= reportTestStep("SERVO_TEST", "servo_off",

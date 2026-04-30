@@ -147,7 +147,6 @@ void printHelp() {
   Serial.println(F("  servo stop"));
   Serial.println(F("  servo 0"));
   Serial.println(F("  servo 90"));
-  Serial.println(F("  servo 180"));
   Serial.println(F("  light on"));
   Serial.println(F("  light off"));
   Serial.println(F("  light toggle"));

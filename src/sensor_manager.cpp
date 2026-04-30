@@ -26,8 +26,27 @@ float adcToVoltage(const uint16_t raw) {
   return (static_cast<float>(raw) * ADC_REF_VOLTAGE) / static_cast<float>(ADC_MAX);
 }
 
+float calibratedRawToPct(const uint16_t raw, const uint16_t wetRaw, const uint16_t dryRaw) {
+  const float span = static_cast<float>(dryRaw - wetRaw);
+  if (span <= 0.0f) {
+    return 0.0f;
+  }
+  const float pct = ((static_cast<float>(dryRaw) - static_cast<float>(raw)) * 100.0f) / span;
+  if (pct < 0.0f) {
+    return 0.0f;
+  }
+  if (pct > 100.0f) {
+    return 100.0f;
+  }
+  return pct;
+}
+
 float soilRawToPct(const uint16_t raw) {
-  return 100.0f - ((static_cast<float>(raw) * 100.0f) / static_cast<float>(ADC_MAX));
+  return calibratedRawToPct(raw, SOIL_RAW_WET, SOIL_RAW_DRY);
+}
+
+float rainRawToPct(const uint16_t raw) {
+  return calibratedRawToPct(raw, RAIN_RAW_WET, RAIN_RAW_DRY);
 }
 
 float updateSoilEma(const float soilPct) {
@@ -215,6 +234,9 @@ void printCompactBlock(const SensorData &data) {
   Serial.print(F("("));
   Serial.print(rainV, 3);
   Serial.print(F("V)"));
+  Serial.print(F(" RainPctDiag:"));
+  Serial.print(rainRawToPct(data.rainAO), 1);
+  Serial.print(F("%"));
 
   Serial.print(F(" SoilDO:"));
   Serial.print(data.soilDO);
@@ -260,11 +282,27 @@ bool runPolicySelfTest() {
   first.rain_ok = true;
   applyValidityPolicy(first, 1000);
   pass &= first.soilPct < 0.1f;
+  Serial.print(F("SOIL_CAL raw="));
+  Serial.print(SOIL_RAW_DRY);
+  Serial.print(F(" pct="));
+  Serial.println(soilRawToPct(SOIL_RAW_DRY), 1);
 
   SensorData second = first;
-  second.soilAO = 0;
+  second.soilAO = SOIL_RAW_WET;
   applyValidityPolicy(second, 3000);
   pass &= second.soilPct > 24.9f && second.soilPct < 25.1f;
+  Serial.print(F("SOIL_CAL raw="));
+  Serial.print(SOIL_RAW_WET);
+  Serial.print(F(" pct="));
+  Serial.println(soilRawToPct(SOIL_RAW_WET), 1);
+  Serial.print(F("RAIN_AO_CAL dry_raw="));
+  Serial.print(RAIN_RAW_DRY);
+  Serial.print(F(" dry_pct="));
+  Serial.print(rainRawToPct(RAIN_RAW_DRY), 1);
+  Serial.print(F(" wet_raw="));
+  Serial.print(RAIN_RAW_WET);
+  Serial.print(F(" wet_pct="));
+  Serial.println(rainRawToPct(RAIN_RAW_WET), 1);
 
   SensorData rainSample = second;
   rainSample.rainDO = 1;

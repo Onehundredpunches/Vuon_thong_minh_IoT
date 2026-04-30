@@ -79,7 +79,7 @@ ParsedCommand parseCommand(const char *cmd) {
 
   int targetAngle = -1;
   if (sscanf(cmd, "servo %d", &targetAngle) == 1 &&
-      (targetAngle == 0 || targetAngle == 90 || targetAngle == 180)) {
+      (targetAngle == AUTO_ROOF_OPEN_ANGLE || targetAngle == AUTO_ROOF_SAFE_ANGLE)) {
     return {CommandKind::ServoAngle, targetAngle};
   }
 
@@ -474,6 +474,7 @@ bool runParserSelfTest() {
   pass &= expectKind("servo stop", CommandKind::ServoSweepOff);
   pass &= expectKind("mode manual", CommandKind::SetModeManual);
   pass &= expectKind("set_mode auto", CommandKind::SetModeAuto);
+  pass &= expectKind("servo 180", CommandKind::Unknown);
   pass &= expectKind("servo 45", CommandKind::Unknown);
 
   Serial.print(F("COMMAND_HANDLER_SELF_TEST: "));

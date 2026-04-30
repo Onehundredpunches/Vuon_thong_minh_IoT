@@ -35,16 +35,21 @@ static constexpr uint16_t RAIN_DO_THRESHOLD_AO = 2000;
 static constexpr uint32_t SENSOR_SAMPLE_INTERVAL_MS = 2000;
 static constexpr uint32_t SENSOR_MAX_STALE_MS = 6000;
 static constexpr uint32_t RAIN_DEBOUNCE_MS = 1000;
-static constexpr uint32_t RAIN_CLEAR_REOPEN_DELAY_MS = 300000;
+static constexpr uint32_t RAIN_CLEAR_REOPEN_DELAY_MS = 30000;
+
+static constexpr uint16_t SOIL_RAW_WET = 1260;
+static constexpr uint16_t SOIL_RAW_DRY = 4095;
+static constexpr uint16_t RAIN_RAW_WET = 1410;
+static constexpr uint16_t RAIN_RAW_DRY = 4095;
 
 static constexpr float AUTO_TEMP_FAN_ON_C = 28.0f;
 static constexpr float AUTO_TEMP_FAN_OFF_C = 24.0f;
-static constexpr float AUTO_SOIL_PUMP_ON_PCT = 40.0f;
-static constexpr float AUTO_SOIL_PUMP_OFF_PCT = 70.0f;
-static constexpr float AUTO_LIGHT_ON_LUX = 3000.0f;
-static constexpr float AUTO_LIGHT_OFF_LUX = 8000.0f;
-static constexpr int AUTO_ROOF_OPEN_ANGLE = 90;
-static constexpr int AUTO_ROOF_SAFE_ANGLE = 0;
+static constexpr float AUTO_SOIL_PUMP_ON_PCT = 35.0f;
+static constexpr float AUTO_SOIL_PUMP_OFF_PCT = 55.0f;
+static constexpr float AUTO_LIGHT_ON_LUX = 50.0f;
+static constexpr float AUTO_LIGHT_OFF_LUX = 200.0f;
+static constexpr int AUTO_ROOF_OPEN_ANGLE = 0;
+static constexpr int AUTO_ROOF_SAFE_ANGLE = 90;
 
 static constexpr const char *WIFI_PRIMARY_SSID = "Trang 72";
 static constexpr const char *WIFI_PRIMARY_PASSWORD = "79797979";

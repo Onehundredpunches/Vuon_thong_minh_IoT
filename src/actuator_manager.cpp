@@ -12,7 +12,7 @@ Servo g_roofServo;
 const bool RELAY_ACTIVE_HIGH = true;
 
 static constexpr int SERVO_MIN_ANGLE = 0;
-static constexpr int SERVO_MAX_ANGLE = 180;
+static constexpr int SERVO_MAX_ANGLE = 90;
 static constexpr int SERVO_STEP_DEG = 2;
 static constexpr uint32_t SERVO_STEP_INTERVAL_MS = 20;
 static constexpr uint8_t LIGHT_BLINK_COUNT = 5;
@@ -26,7 +26,7 @@ static constexpr uint32_t LIGHT_COOLDOWN_MS = 5000;
 bool g_selfTestMode = false;
 bool g_servoEnabled = true;
 bool g_servoSweepEnabled = false;
-int g_servoAngle = SERVO_MIN_ANGLE;
+int g_servoAngle = AUTO_ROOF_SAFE_ANGLE;
 int g_servoDirection = 1;
 uint32_t g_nextServoStepMs = 0;
 bool g_lightOn = false;
@@ -93,7 +93,7 @@ bool cooldownActive(const uint32_t nowMs, const uint32_t cooldownUntilMs) {
 }
 
 bool roofOpenAngle(const int angle) {
-  return angle > 0;
+  return angle == AUTO_ROOF_OPEN_ANGLE;
 }
 
 bool elapsedAtLeast(const uint32_t nowMs, const uint32_t sinceMs, const uint32_t durationMs) {
@@ -279,24 +279,33 @@ void printCommandReject(const char *cmd, const ActuatorCommandStatus status) {
 }
 
 void setServoSweep(const bool enabled) {
-  g_servoSweepEnabled = enabled;
-  if (!g_servoSweepEnabled) {
+  g_servoSweepEnabled = false;
+  if (enabled) {
+    Serial.println(F("ROOF_SWEEP_BLOCKED bounded_0_90_only"));
+  }
+}
+
+void setServoAngleCommand(const int angle) {
+  if (angle != AUTO_ROOF_OPEN_ANGLE && angle != AUTO_ROOF_SAFE_ANGLE) {
+    Serial.print(F("ROOF_ANGLE_REJECT angle="));
+    Serial.print(angle);
+    Serial.println(F(" allowed=0,90"));
     return;
   }
   if (!g_servoEnabled) {
     setServoOnOff(true);
   }
-  g_servoDirection = 1;
-  g_nextServoStepMs = millis() + SERVO_STEP_INTERVAL_MS;
-}
-
-void setServoAngleCommand(const int angle) {
-  if (!g_servoEnabled) {
-    setServoOnOff(true);
+  const int boundedAngle = constrain(angle, SERVO_MIN_ANGLE, SERVO_MAX_ANGLE);
+  if (g_servoAngle == boundedAngle) {
+    Serial.print(F("ROOF_WRITE_SKIP angle="));
+    Serial.println(g_servoAngle);
+    return;
   }
-  g_servoAngle = constrain(angle, SERVO_MIN_ANGLE, SERVO_MAX_ANGLE);
+  g_servoAngle = boundedAngle;
   g_servoSweepEnabled = false;
   writeServoAngle();
+  Serial.print(F("ROOF_WRITE angle="));
+  Serial.println(g_servoAngle);
 }
 
 ActuatorCommandStatus requestLight(const bool on, const uint32_t nowMs) {
@@ -359,7 +368,7 @@ ActuatorCommandStatus requestPump(const bool on, const uint32_t nowMs) {
 
 ActuatorCommandStatus requestServoSweep(const bool enabled, const uint32_t nowMs) {
   (void)nowMs;
-  if (enabled && g_roofOpenInterlock) {
+  if (enabled) {
     return ActuatorCommandStatus::InterlockViolation;
   }
   setServoSweep(enabled);
@@ -383,12 +392,12 @@ void initServoControl() {
 #if APP_MODE_SIMULATOR
   g_servoEnabled = false;
   g_servoSweepEnabled = false;
-  g_servoAngle = SERVO_MIN_ANGLE;
+  g_servoAngle = AUTO_ROOF_SAFE_ANGLE;
   Serial.println(F("SERVO: OFF"));
 #else
   g_servoEnabled = true;
   g_servoSweepEnabled = false;
-  g_servoAngle = SERVO_MIN_ANGLE;
+  g_servoAngle = AUTO_ROOF_SAFE_ANGLE;
   g_servoDirection = 1;
   attachServoIfNeeded();
   writeServoAngle();
@@ -401,29 +410,8 @@ void initServoControl() {
 }
 
 void updateServoSweep(const uint32_t nowMs) {
-#if APP_MODE_SIMULATOR
   (void)nowMs;
-#else
-  if (!g_servoEnabled || !g_servoSweepEnabled || (!g_selfTestMode && !g_roofServo.attached())) {
-    return;
-  }
-  if (static_cast<int32_t>(nowMs - g_nextServoStepMs) < 0) {
-    return;
-  }
-  g_nextServoStepMs += SERVO_STEP_INTERVAL_MS;
-
-  g_servoAngle += (SERVO_STEP_DEG * g_servoDirection);
-  if (g_servoAngle >= SERVO_MAX_ANGLE) {
-    g_servoAngle = SERVO_MAX_ANGLE;
-    g_servoDirection = -1;
-  } else if (g_servoAngle <= SERVO_MIN_ANGLE) {
-    g_servoAngle = SERVO_MIN_ANGLE;
-    g_servoDirection = 1;
-  }
-  if (!g_selfTestMode) {
-    g_roofServo.write(g_servoAngle);
-  }
-#endif
+  g_servoSweepEnabled = false;
 }
 
 void restoreSafeDefaults() {
@@ -442,7 +430,7 @@ void restoreSafeDefaults() {
   g_roofOpenInterlock = false;
   g_servoEnabled = true;
   g_servoSweepEnabled = false;
-  g_servoAngle = SERVO_MIN_ANGLE;
+  g_servoAngle = AUTO_ROOF_SAFE_ANGLE;
   g_servoDirection = 1;
   attachServoIfNeeded();
   writeServoAngle();
@@ -490,8 +478,8 @@ bool runSafetySelfTest() {
 
   restoreSafeDefaults();
   setRoofOpenInterlock(true);
-  allPass &= (requestServoAngleCommand(90, t0) == ActuatorCommandStatus::InterlockViolation);
-  allPass &= (requestServoAngleCommand(0, t0) == ActuatorCommandStatus::Ok);
+  allPass &= (requestServoAngleCommand(AUTO_ROOF_OPEN_ANGLE, t0) == ActuatorCommandStatus::InterlockViolation);
+  allPass &= (requestServoAngleCommand(AUTO_ROOF_SAFE_ANGLE, t0) == ActuatorCommandStatus::Ok);
   setRoofOpenInterlock(false);
 
   restoreSafeDefaults();

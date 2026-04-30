@@ -127,7 +127,6 @@ servo sweep off
 servo stop
 servo 0
 servo 90
-servo 180
 light on
 light off
 light toggle

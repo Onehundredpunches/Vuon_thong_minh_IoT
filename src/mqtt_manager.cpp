@@ -307,7 +307,7 @@ bool buildCommandText(JsonDocument &doc, char *out, const size_t outSize) {
   if (strcasecmp(target, "roof") == 0 || strcasecmp(target, "servo") == 0) {
     if (doc["value"].is<int>()) {
       const int angle = doc["value"].as<int>();
-      if (angle == 0 || angle == 90 || angle == 180) {
+      if (angle == AUTO_ROOF_OPEN_ANGLE || angle == AUTO_ROOF_SAFE_ANGLE) {
         snprintf(out, outSize, "servo %d", angle);
         return true;
       }

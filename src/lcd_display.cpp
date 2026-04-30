@@ -94,9 +94,10 @@ void buildPage2Line1(const LcdDisplayState &state, char *out) {
 
 void buildPage2Line2(const LcdDisplayState &state, char *out) {
   char raw[32] = {0};
+  const char *roof = (state.actuators.servoAngle == AUTO_ROOF_OPEN_ANGLE) ? "O" : "C";
   const char *rain = (state.sensors.rain_ok && state.sensors.rainDO == 0) ? "WET" : "DRY";
-  snprintf(raw, sizeof(raw), "R:%s W:%d%% C:%s", rain, roundFloatToInt(state.sensors.soilPct),
-           state.controlOwner);
+  const char *owner = (strcmp(state.controlOwner, "AUTO") == 0 || strcmp(state.controlOwner, "AU") == 0) ? "AU" : "BE";
+  snprintf(raw, sizeof(raw), "K:%s R:%s C:%s", roof, rain, owner);
   format16(raw, out);
 }
 
@@ -203,6 +204,13 @@ void updateLcd(const uint32_t nowMs, const LcdDisplayState &state) {
   g_lcd->print(line1);
   g_lcd->setCursor(0, 1);
   g_lcd->print(line2);
+  Serial.print(F("LCD_RENDER page="));
+  Serial.print(g_lcdPage + 1);
+  Serial.print(F(" line1='"));
+  Serial.print(line1);
+  Serial.print(F("' line2='"));
+  Serial.print(line2);
+  Serial.println(F("'"));
 }
 
 bool lcdDeviceAvailable() {
@@ -232,6 +240,7 @@ bool runLcdFormatterSelfTest() {
   state.actuators.pumpOn = true;
   state.actuators.fanOn = false;
   state.actuators.lightOn = true;
+  state.actuators.servoAngle = AUTO_ROOF_OPEN_ANGLE;
 
   char out[LCD_COLS + 1] = {0};
   buildPage1Line1(state, out);
@@ -242,6 +251,7 @@ bool runLcdFormatterSelfTest() {
   pass &= expectFixedWidth("page2_line1", out);
   buildPage2Line2(state, out);
   pass &= expectFixedWidth("page2_line2", out);
+  pass &= strcmp(out, "K:O R:DRY C:AU  ") == 0;
 
   Serial.print(F("LCD_FORMATTER_SELF_TEST: "));
   Serial.println(pass ? F("PASS") : F("FAIL"));
