@@ -60,6 +60,7 @@ void printStartup() {
 
 void tickFastTasks(const uint32_t now) {
   SerialCLI::tick();
+  ActuatorManager::setAutoSafetyEnabled(ModeController::mode() == SystemMode::Auto);
   ActuatorManager::updateServoSweep(now);
   ActuatorManager::updateLightBlink(now);
   ActuatorManager::tickSafety(now);

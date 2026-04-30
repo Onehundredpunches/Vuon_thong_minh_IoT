@@ -37,6 +37,7 @@ int g_servoDirection = 1;
 uint32_t g_nextServoStepMs = 0;
 bool g_roofMotionActive = false;
 uint32_t g_roofMotionStopMs = 0;
+bool g_autoSafetyEnabled = true;
 bool g_lightOn = false;
 bool g_fanOn = false;
 bool g_pumpOn = false;
@@ -310,7 +311,7 @@ void startServoAngleCommand(const int angle, const uint32_t nowMs) {
   if (!g_servoEnabled) {
     setServoOnOff(true);
   }
-  if (g_servoAngle == angle && !g_roofMotionActive) {
+  if (g_servoAngle == angle && !g_roofMotionActive && g_autoSafetyEnabled) {
     Serial.print(F("ROOF_WRITE_SKIP angle="));
     Serial.println(g_servoAngle);
     return;
@@ -412,6 +413,10 @@ void setRoofOpenInterlock(const bool active) {
   g_roofOpenInterlock = active;
 }
 
+void setAutoSafetyEnabled(const bool enabled) {
+  g_autoSafetyEnabled = enabled;
+}
+
 void initServoControl() {
 #if APP_MODE_SIMULATOR
   g_servoEnabled = false;
@@ -475,7 +480,7 @@ void restoreSafeDefaults() {
 }
 
 void tickSafety(const uint32_t nowMs) {
-  if (g_pumpOn && g_pumpOnSinceMs > 0 && elapsedAtLeast(nowMs, g_pumpOnSinceMs, PUMP_MAX_ON_MS)) {
+  if (g_autoSafetyEnabled && g_pumpOn && g_pumpOnSinceMs > 0 && elapsedAtLeast(nowMs, g_pumpOnSinceMs, PUMP_MAX_ON_MS)) {
     g_pumpOn = false;
     g_pumpOnSinceMs = 0;
     g_pumpCooldownUntilMs = nowMs + PUMP_COOLDOWN_MS;
