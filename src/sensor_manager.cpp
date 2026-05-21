@@ -21,6 +21,7 @@ bool g_soilEmaInitialized = false;
 uint8_t g_debouncedRainDO = 0;
 uint8_t g_pendingRainDO = 0;
 uint32_t g_rainPendingSinceMs = 0;
+bool g_rainDebounceInitialized = false;
 
 float adcToVoltage(const uint16_t raw) {
   return (static_cast<float>(raw) * ADC_REF_VOLTAGE) / static_cast<float>(ADC_MAX);
@@ -63,16 +64,55 @@ bool stale(const uint32_t nowMs, const uint32_t lastValidMs, const uint32_t maxS
   return lastValidMs == 0 || static_cast<uint32_t>(nowMs - lastValidMs) > maxStaleMs;
 }
 
-uint8_t debounceRainDO(const uint8_t rawRainDO, const uint32_t nowMs) {
+bool debounceRainDO(const uint8_t rawRainDO, const uint32_t nowMs, uint8_t &debouncedOut) {
+  if (!g_rainDebounceInitialized && g_rainPendingSinceMs == 0) {
+    g_pendingRainDO = rawRainDO;
+    g_rainPendingSinceMs = nowMs;
+    debouncedOut = rawRainDO;
+    return false;
+  }
+
   if (rawRainDO != g_pendingRainDO) {
     g_pendingRainDO = rawRainDO;
     g_rainPendingSinceMs = nowMs;
+    debouncedOut = g_debouncedRainDO;
+    return false;
   }
-  if (g_debouncedRainDO != g_pendingRainDO &&
-      static_cast<uint32_t>(nowMs - g_rainPendingSinceMs) >= RAIN_DEBOUNCE_MS) {
+
+  const bool stable = static_cast<uint32_t>(nowMs - g_rainPendingSinceMs) >= RAIN_DEBOUNCE_MS;
+  if (stable) {
     g_debouncedRainDO = g_pendingRainDO;
+    g_rainDebounceInitialized = true;
   }
-  return g_debouncedRainDO;
+
+  debouncedOut = g_rainDebounceInitialized ? g_debouncedRainDO : g_pendingRainDO;
+  return g_rainDebounceInitialized && stable;
+}
+
+void printRainValidity(const bool valid, const uint8_t rawRainDO, const uint8_t debouncedRainDO,
+                       const __FlashStringHelper *reason) {
+  Serial.print(F("RAIN_VALID valid="));
+  Serial.print(valid ? 1 : 0);
+  Serial.print(F(" raw_do="));
+  Serial.print(rawRainDO);
+  Serial.print(F(" debounced_do="));
+  Serial.print(debouncedRainDO);
+  Serial.print(F(" reason="));
+  Serial.println(reason);
+}
+
+void resetRainDebounceForTest() {
+  g_debouncedRainDO = 0;
+  g_pendingRainDO = 0;
+  g_rainPendingSinceMs = 0;
+  g_rainDebounceInitialized = false;
+}
+
+void resetSensorPolicyForTest() {
+  g_lastValid = {};
+  g_soilEmaPct = 0.0f;
+  g_soilEmaInitialized = false;
+  resetRainDebounceForTest();
 }
 
 void setStaleDefaults(SensorData &data) {
@@ -119,16 +159,29 @@ void applyValidityPolicy(SensorData &data, const uint32_t nowMs) {
     data.soil_last_valid_ms = g_lastValid.soil_last_valid_ms;
   }
 
+  const uint8_t rawRainDO = data.rainDO;
   if (data.rain_ok) {
-    data.rain_last_valid_ms = nowMs;
-    data.rainDO = debounceRainDO(data.rainDO, nowMs);
-    g_lastValid.rainAO = data.rainAO;
-    g_lastValid.rainDO = data.rainDO;
-    g_lastValid.rain_last_valid_ms = nowMs;
+    uint8_t debouncedRainDO = g_debouncedRainDO;
+    const bool rainStable = debounceRainDO(rawRainDO, nowMs, debouncedRainDO);
+    data.rainDO = debouncedRainDO;
+    if (rainStable) {
+      data.rain_last_valid_ms = nowMs;
+      g_lastValid.rainAO = data.rainAO;
+      g_lastValid.rainDO = data.rainDO;
+      g_lastValid.rain_last_valid_ms = nowMs;
+      printRainValidity(true, rawRainDO, data.rainDO, F("stable"));
+    } else {
+      data.rainAO = g_lastValid.rainAO;
+      data.rainDO = g_lastValid.rainDO;
+      data.rain_last_valid_ms = g_lastValid.rain_last_valid_ms;
+      data.rain_ok = false;
+      printRainValidity(false, rawRainDO, debouncedRainDO, F("settling"));
+    }
   } else {
     data.rainAO = g_lastValid.rainAO;
     data.rainDO = g_lastValid.rainDO;
     data.rain_last_valid_ms = g_lastValid.rain_last_valid_ms;
+    printRainValidity(false, rawRainDO, data.rainDO, F("stale"));
   }
 
   data.dht_ok = data.dht_ok && !stale(nowMs, data.dht_last_valid_ms, data.dht_max_stale_ms);
@@ -259,13 +312,9 @@ bool runPolicySelfTest() {
   const uint8_t savedDebouncedRainDO = g_debouncedRainDO;
   const uint8_t savedPendingRainDO = g_pendingRainDO;
   const uint32_t savedRainPendingSinceMs = g_rainPendingSinceMs;
+  const bool savedRainDebounceInitialized = g_rainDebounceInitialized;
 
-  g_lastValid = {};
-  g_soilEmaPct = 0.0f;
-  g_soilEmaInitialized = false;
-  g_debouncedRainDO = 0;
-  g_pendingRainDO = 0;
-  g_rainPendingSinceMs = 0;
+  resetSensorPolicyForTest();
 
   bool pass = true;
   SensorData first{};
@@ -275,13 +324,14 @@ bool runPolicySelfTest() {
   first.soilAO = 4095;
   first.rainAO = 3000;
   first.soilDO = 1;
-  first.rainDO = 0;
+  first.rainDO = 1;
   first.dht_ok = true;
   first.bh1750_ok = true;
   first.soil_ok = true;
   first.rain_ok = true;
   applyValidityPolicy(first, 1000);
   pass &= first.soilPct < 0.1f;
+  pass &= !first.rain_ok;
   Serial.print(F("SOIL_CAL raw="));
   Serial.print(SOIL_RAW_DRY);
   Serial.print(F(" pct="));
@@ -289,8 +339,12 @@ bool runPolicySelfTest() {
 
   SensorData second = first;
   second.soilAO = SOIL_RAW_WET;
+  second.rainAO = 3000;
+  second.rainDO = 1;
+  second.rain_ok = true;
   applyValidityPolicy(second, 3000);
   pass &= second.soilPct > 24.9f && second.soilPct < 25.1f;
+  pass &= second.rain_ok && second.rainDO == 1;
   Serial.print(F("SOIL_CAL raw="));
   Serial.print(SOIL_RAW_WET);
   Serial.print(F(" pct="));
@@ -305,12 +359,14 @@ bool runPolicySelfTest() {
   Serial.println(rainRawToPct(RAIN_RAW_WET), 1);
 
   SensorData rainSample = second;
-  rainSample.rainDO = 1;
+  rainSample.rainDO = 0;
+  rainSample.rain_ok = true;
   applyValidityPolicy(rainSample, 3500);
-  pass &= rainSample.rainDO == 0;
-  rainSample.rainDO = 1;
+  pass &= !rainSample.rain_ok && rainSample.rainDO == 1;
+  rainSample.rainDO = 0;
+  rainSample.rain_ok = true;
   applyValidityPolicy(rainSample, 4600);
-  pass &= rainSample.rainDO == 1;
+  pass &= rainSample.rain_ok && rainSample.rainDO == 0;
 
   SensorData staleSample = rainSample;
   staleSample.dht_ok = false;
@@ -325,6 +381,7 @@ bool runPolicySelfTest() {
   g_debouncedRainDO = savedDebouncedRainDO;
   g_pendingRainDO = savedPendingRainDO;
   g_rainPendingSinceMs = savedRainPendingSinceMs;
+  g_rainDebounceInitialized = savedRainDebounceInitialized;
 
   Serial.print(F("SENSOR_POLICY_SELF_TEST: "));
   Serial.println(pass ? F("PASS") : F("FAIL"));

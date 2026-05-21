@@ -1,6 +1,7 @@
 #include "self_test.h"
 
 #include <Arduino.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "actuator_manager.h"
@@ -10,7 +11,9 @@
 #include "lcd_display.h"
 #include "mode_controller.h"
 #include "mqtt_manager.h"
+#include "nvs_store.h"
 #include "sensor_manager.h"
+#include "time_sync.h"
 
 namespace SelfTest {
 namespace {
@@ -33,6 +36,8 @@ bool g_mqttReconnectSelfTestPass = false;
 bool g_mqttCommandAckSelfTestPass = false;
 bool g_mqttRetainedStateSelfTestPass = false;
 bool g_fullIntegrationSelfTestPass = false;
+bool g_nvsStoreSelfTestPass = false;
+bool g_timeSyncSelfTestPass = false;
 
 bool reportTestStep(const char *group, const char *step, const bool pass) {
   Serial.print(group);
@@ -102,6 +107,8 @@ void runRelaySelfTest(const CommandExecutor executeCommand) {
 
 void runServoSelfTest(const CommandExecutor executeCommand) {
   bool allPass = true;
+  char closeCommand[16] = {0};
+  snprintf(closeCommand, sizeof(closeCommand), "servo %d", AUTO_ROOF_SAFE_ANGLE);
 
   executeCommand("servo on");
   allPass &= reportTestStep("SERVO_TEST", "servo_on", ActuatorManager::servoEnabled());
@@ -112,9 +119,10 @@ void runServoSelfTest(const CommandExecutor executeCommand) {
   executeCommand("servo sweep off");
   allPass &= reportTestStep("SERVO_TEST", "sweep_off", !ActuatorManager::servoSweepEnabled());
 
-  executeCommand("servo 90");
-  allPass &= reportTestStep("SERVO_TEST", "angle_90",
-                            ActuatorManager::servoAngle() == 90 && !ActuatorManager::servoSweepEnabled());
+  executeCommand(closeCommand);
+  allPass &= reportTestStep("SERVO_TEST", "logical_close",
+                            ActuatorManager::servoAngle() == AUTO_ROOF_SAFE_ANGLE &&
+                                !ActuatorManager::servoSweepEnabled());
 
   executeCommand("servo off");
   allPass &= reportTestStep("SERVO_TEST", "servo_off",
@@ -173,7 +181,7 @@ bool runFullIntegrationSelfTest() {
   pass &= !ActuatorManager::lightOn();
   pass &= !ActuatorManager::fanOn();
   pass &= !ActuatorManager::pumpOn();
-  pass &= ActuatorManager::servoAngle() == AUTO_ROOF_SAFE_ANGLE;
+  pass &= ActuatorManager::servoAngle() == AUTO_ROOF_SAFE_ANGLE; // logical roof-closed marker
 
   ModeController::enterSafeStop("integration_fault", 1700);
   result = CommandHandler::executeStructured("pump on", false, 1800);
@@ -210,6 +218,8 @@ bool run(const CommandExecutor executeCommand) {
   g_mqttCommandAckSelfTestPass = MqttManager::runCommandAckSelfTest();
   g_mqttRetainedStateSelfTestPass = MqttManager::runRetainedStateSelfTest();
   g_fullIntegrationSelfTestPass = runFullIntegrationSelfTest();
+  g_nvsStoreSelfTestPass = NvsStore::runSelfTest();
+  g_timeSyncSelfTestPass = TimeSync::runSelfTest();
   g_lcdFormatterSelfTestPass = runLcdFormatterSelfTest();
   Serial.print(F("LCD_DEVICE_SELF_TEST: "));
   Serial.println(lcdDeviceAvailable() ? F("READY") : F("NOT_READY"));
@@ -221,7 +231,34 @@ bool run(const CommandExecutor executeCommand) {
                        g_commandHandlerSelfTestPass && g_modeFsmSelfTestPass &&
                        g_autoLogicSelfTestPass && g_mqttReconnectSelfTestPass &&
                        g_mqttCommandAckSelfTestPass && g_mqttRetainedStateSelfTestPass &&
-                       g_fullIntegrationSelfTestPass && g_lcdFormatterSelfTestPass;
+                       g_fullIntegrationSelfTestPass && g_lcdFormatterSelfTestPass &&
+                       g_nvsStoreSelfTestPass && g_timeSyncSelfTestPass;
+  Serial.print(F("SELF_TEST_SUMMARY pinmap="));
+  Serial.print(g_pinMapSelfTestPass ? F("PASS") : F("FAIL"));
+  Serial.print(F(" relay="));
+  Serial.print(g_relaySelfTestPass ? F("PASS") : F("FAIL"));
+  Serial.print(F(" servo="));
+  Serial.print(g_servoSelfTestPass ? F("PASS") : F("FAIL"));
+  Serial.print(F(" actuator_safety="));
+  Serial.print(g_actuatorSafetySelfTestPass ? F("PASS") : F("FAIL"));
+  Serial.print(F(" sensor_policy="));
+  Serial.print(g_sensorPolicySelfTestPass ? F("PASS") : F("FAIL"));
+  Serial.print(F(" command="));
+  Serial.print(g_commandHandlerSelfTestPass ? F("PASS") : F("FAIL"));
+  Serial.print(F(" mode="));
+  Serial.print(g_modeFsmSelfTestPass ? F("PASS") : F("FAIL"));
+  Serial.print(F(" auto_logic="));
+  Serial.print(g_autoLogicSelfTestPass ? F("PASS") : F("FAIL"));
+  Serial.print(F(" mqtt="));
+  Serial.print((g_mqttReconnectSelfTestPass && g_mqttCommandAckSelfTestPass && g_mqttRetainedStateSelfTestPass) ? F("PASS") : F("FAIL"));
+  Serial.print(F(" integration="));
+  Serial.print(g_fullIntegrationSelfTestPass ? F("PASS") : F("FAIL"));
+  Serial.print(F(" lcd="));
+  Serial.print(g_lcdFormatterSelfTestPass ? F("PASS") : F("FAIL"));
+  Serial.print(F(" nvs="));
+  Serial.print(g_nvsStoreSelfTestPass ? F("PASS") : F("FAIL"));
+  Serial.print(F(" time="));
+  Serial.println(g_timeSyncSelfTestPass ? F("PASS") : F("FAIL"));
   Serial.print(F("SELF_TEST: "));
   Serial.println(allPass ? F("PASS") : F("FAIL"));
   return allPass;

@@ -13,11 +13,6 @@ const bool RELAY_ACTIVE_HIGH = true;
 
 static constexpr int SERVO_MIN_ANGLE = 0;
 static constexpr int SERVO_MAX_ANGLE = 180;
-static constexpr int SERVO_STOP = 90;
-static constexpr int SERVO_OPEN_CMD = 70;
-static constexpr int SERVO_CLOSE_CMD = 110;
-static constexpr uint32_t ROOF_MOVE_OPEN_MS = 1800;
-static constexpr uint32_t ROOF_MOVE_CLOSE_MS = 1800;
 static constexpr int SERVO_STEP_DEG = 2;
 static constexpr uint32_t SERVO_STEP_INTERVAL_MS = 20;
 static constexpr uint8_t LIGHT_BLINK_COUNT = 5;
@@ -31,8 +26,8 @@ static constexpr uint32_t LIGHT_COOLDOWN_MS = 5000;
 bool g_selfTestMode = false;
 bool g_servoEnabled = true;
 bool g_servoSweepEnabled = false;
-int g_servoAngle = AUTO_ROOF_SAFE_ANGLE;
-int g_servoPulse = SERVO_STOP;
+int g_servoAngle = AUTO_ROOF_OPEN_ANGLE; // Logical roof state, not physical servo angle.
+int g_servoPulse = SERVO_STOP_CMD;
 int g_servoDirection = 1;
 uint32_t g_nextServoStepMs = 0;
 bool g_roofMotionActive = false;
@@ -50,6 +45,8 @@ uint32_t g_fanCooldownUntilMs = 0;
 uint32_t g_pumpOnSinceMs = 0;
 uint32_t g_pumpCooldownUntilMs = 0;
 bool g_roofOpenInterlock = false;
+bool g_pumpSafetyTimeoutFlag = false;
+uint8_t g_pumpSafetyTimeoutCount = 0;
 
 bool attachServoIfNeeded() {
 #if APP_MODE_SIMULATOR
@@ -70,7 +67,7 @@ void writeServoAngle() {
 #if APP_MODE_SIMULATOR
   return;
 #else
-  if (!g_servoEnabled) {
+  if (!g_servoEnabled || g_selfTestMode) {
     return;
   }
   if (attachServoIfNeeded()) {
@@ -108,6 +105,10 @@ bool cooldownActive(const uint32_t nowMs, const uint32_t cooldownUntilMs) {
 
 bool roofOpenAngle(const int angle) {
   return angle == AUTO_ROOF_OPEN_ANGLE;
+}
+
+const __FlashStringHelper *roofLogicalStateName(const int state) {
+  return (state == AUTO_ROOF_OPEN_ANGLE) ? F("OPEN") : F("CLOSED");
 }
 
 bool elapsedAtLeast(const uint32_t nowMs, const uint32_t sinceMs, const uint32_t durationMs) {
@@ -264,7 +265,9 @@ void printServoAck(const char *cmd) {
   Serial.print(cmd);
   Serial.print(F(" | SERVO="));
   Serial.print(g_servoEnabled ? F("ON") : F("OFF"));
-  Serial.print(F(" ANGLE="));
+  Serial.print(F(" ROOF_STATE="));
+  Serial.print(roofLogicalStateName(g_servoAngle));
+  Serial.print(F(" state_id="));
   Serial.print(g_servoAngle);
   Serial.print(F(" PULSE="));
   Serial.print(g_servoPulse);
@@ -297,36 +300,48 @@ void printCommandReject(const char *cmd, const ActuatorCommandStatus status) {
 void setServoSweep(const bool enabled) {
   g_servoSweepEnabled = false;
   if (enabled) {
-    Serial.println(F("ROOF_SWEEP_BLOCKED bounded_0_90_only"));
+    Serial.println(F("ROOF_SWEEP_BLOCKED continuous_servo_timed_motion_only"));
   }
 }
 
 void startServoAngleCommand(const int angle, const uint32_t nowMs) {
   if (angle != AUTO_ROOF_OPEN_ANGLE && angle != AUTO_ROOF_SAFE_ANGLE) {
-    Serial.print(F("ROOF_ANGLE_REJECT angle="));
+    Serial.print(F("ROOF_STATE_REJECT state_id="));
     Serial.print(angle);
-    Serial.println(F(" allowed=0,90"));
+    Serial.print(F(" allowed=0,"));
+    Serial.println(AUTO_ROOF_SAFE_ANGLE);
+    return;
+  }
+  if (g_selfTestMode) {
+    g_servoAngle = angle; // Logical state update for test assertions only.
     return;
   }
   if (!g_servoEnabled) {
     setServoOnOff(true);
   }
-  if (g_servoAngle == angle && !g_roofMotionActive && g_autoSafetyEnabled) {
-    Serial.print(F("ROOF_WRITE_SKIP angle="));
+  if (g_servoAngle == angle && !g_roofMotionActive) {
+    Serial.print(F("ROOF_WRITE_SKIP logical_state="));
+    Serial.print(roofLogicalStateName(g_servoAngle));
+    Serial.print(F(" state_id="));
     Serial.println(g_servoAngle);
     return;
   }
   g_servoAngle = angle;
   g_servoSweepEnabled = false;
   g_roofMotionActive = true;
-  g_roofMotionStopMs = nowMs + ((angle == AUTO_ROOF_OPEN_ANGLE) ? ROOF_MOVE_OPEN_MS : ROOF_MOVE_CLOSE_MS);
-  writeServoPulse((angle == AUTO_ROOF_OPEN_ANGLE) ? SERVO_OPEN_CMD : SERVO_CLOSE_CMD);
-  Serial.print(F("ROOF_WRITE angle="));
+  const bool opening = angle == AUTO_ROOF_OPEN_ANGLE;
+  const uint32_t durationMs = opening ? ROOF_MOVE_OPEN_MS : ROOF_MOVE_CLOSE_MS;
+  const int pulseCmd = opening ? SERVO_OPEN_CMD : SERVO_CLOSE_CMD;
+  g_roofMotionStopMs = nowMs + durationMs;
+  writeServoPulse(pulseCmd);
+  Serial.print(F("ROOF_MOVE_START logical_state="));
+  Serial.print(roofLogicalStateName(g_servoAngle));
+  Serial.print(F(" state_id="));
   Serial.print(g_servoAngle);
-  Serial.print(F(" pulse="));
+  Serial.print(F(" pulse_cmd="));
   Serial.print(g_servoPulse);
   Serial.print(F(" dur_ms="));
-  Serial.println((angle == AUTO_ROOF_OPEN_ANGLE) ? ROOF_MOVE_OPEN_MS : ROOF_MOVE_CLOSE_MS);
+  Serial.println(durationMs);
 }
 
 void setServoAngleCommand(const int angle) {
@@ -417,27 +432,29 @@ void setAutoSafetyEnabled(const bool enabled) {
   g_autoSafetyEnabled = enabled;
 }
 
-void initServoControl() {
+void initServoControl(const int initialAngle) {
 #if APP_MODE_SIMULATOR
   g_servoEnabled = false;
   g_servoSweepEnabled = false;
-  g_servoAngle = AUTO_ROOF_SAFE_ANGLE;
-  g_servoPulse = SERVO_STOP;
+  g_servoAngle = initialAngle;
+  g_servoPulse = SERVO_STOP_CMD;
   g_roofMotionActive = false;
   Serial.println(F("SERVO: OFF"));
 #else
   g_servoEnabled = true;
   g_servoSweepEnabled = false;
-  g_servoAngle = AUTO_ROOF_SAFE_ANGLE;
-  g_servoPulse = SERVO_STOP;
+  g_servoAngle = initialAngle;
+  g_servoPulse = SERVO_STOP_CMD;
   g_roofMotionActive = false;
   g_servoDirection = 1;
-  attachServoIfNeeded();
-  writeServoAngle();
+  // attachServoIfNeeded();  // DO NOT ATTACH ON BOOT TO PREVENT TWITCH
+  // writeServoAngle();      // DO NOT WRITE ON BOOT TO PREVENT TWITCH
   g_nextServoStepMs = millis() + SERVO_STEP_INTERVAL_MS;
   Serial.println(F("SERVO: ON"));
   Serial.println(F("SERVO: SWEEP OFF"));
-  Serial.print(F("SERVO: ANGLE="));
+  Serial.print(F("SERVO: ROOF_STATE="));
+  Serial.print(roofLogicalStateName(g_servoAngle));
+  Serial.print(F(" state_id="));
   Serial.println(g_servoAngle);
 #endif
 }
@@ -451,8 +468,11 @@ void updateServoSweep(const uint32_t nowMs) {
     return;
   }
   g_roofMotionActive = false;
-  writeServoPulse(SERVO_STOP);
-  Serial.println(F("ROOF_STOP sent=1"));
+  writeServoPulse(SERVO_STOP_CMD);
+  Serial.print(F("ROOF_STOP pulse_cmd="));
+  Serial.print(g_servoPulse);
+  Serial.print(F(" logical_state="));
+  Serial.println(roofLogicalStateName(g_servoAngle));
 }
 
 void restoreSafeDefaults() {
@@ -469,14 +489,16 @@ void restoreSafeDefaults() {
   g_pumpOnSinceMs = 0;
   g_pumpCooldownUntilMs = 0;
   g_roofOpenInterlock = false;
+  g_pumpSafetyTimeoutFlag = false;
+  g_pumpSafetyTimeoutCount = 0;
   g_servoEnabled = true;
   g_servoSweepEnabled = false;
   g_servoAngle = AUTO_ROOF_SAFE_ANGLE;
-  g_servoPulse = SERVO_STOP;
+  g_servoPulse = SERVO_STOP_CMD;
   g_roofMotionActive = false;
   g_servoDirection = 1;
-  attachServoIfNeeded();
-  writeServoAngle();
+  // attachServoIfNeeded();
+  // writeServoAngle();
 }
 
 void tickSafety(const uint32_t nowMs) {
@@ -485,7 +507,10 @@ void tickSafety(const uint32_t nowMs) {
     g_pumpOnSinceMs = 0;
     g_pumpCooldownUntilMs = nowMs + PUMP_COOLDOWN_MS;
     writeRelayPin(PIN_RELAY_PUMP, false);
-    Serial.println(F("SAFETY pump timeout | PUMP=OFF cooldown_active"));
+    g_pumpSafetyTimeoutFlag = true;
+    ++g_pumpSafetyTimeoutCount;
+    Serial.print(F("SAFETY pump timeout | PUMP=OFF cooldown_active count="));
+    Serial.println(g_pumpSafetyTimeoutCount);
   }
 
   if (g_fanOn && g_fanOnSinceMs > 0 && elapsedAtLeast(nowMs, g_fanOnSinceMs, FAN_MAX_ON_MS)) {
@@ -569,6 +594,22 @@ bool servoDetachedOrSelfTest() {
 #else
   return g_selfTestMode || !g_roofServo.attached();
 #endif
+}
+
+bool pumpSafetyTimeoutFlag() {
+  return g_pumpSafetyTimeoutFlag;
+}
+
+void clearPumpSafetyTimeoutFlag() {
+  g_pumpSafetyTimeoutFlag = false;
+}
+
+uint8_t pumpSafetyTimeoutCount() {
+  return g_pumpSafetyTimeoutCount;
+}
+
+void resetPumpSafetyTimeoutCount() {
+  g_pumpSafetyTimeoutCount = 0;
 }
 
 ActuatorSnapshot snapshot() {

@@ -17,21 +17,31 @@ uint32_t g_pumpLastOffMs = 0;
 uint32_t g_pumpInvalidSinceMs = 0;
 bool g_pumpInvalidHoldLogged = false;
 bool g_pumpInvalidForceLogged = false;
-bool g_autoPumpCommandedOn = false;
-bool g_autoPumpSafetyLockout = false;
-bool g_autoPumpSafetyLockoutLogged = false;
 SystemMode g_lastAutoPumpOwnerMode = SystemMode::Boot;
+
+// --- Pump State Machine ---
+enum class PumpState : uint8_t {
+  Idle,          // OFF, waiting for dry trigger
+  Running,       // ON, irrigating
+  SafetyPause,   // After safety timeout, waiting cooldown before retry
+  Locked         // Max retries exceeded, needs wet-soil reset
+};
+PumpState g_pumpState = PumpState::Idle;
+uint8_t g_pumpSafetyRetryCount = 0;
+static constexpr uint8_t PUMP_MAX_SAFETY_RETRIES = 3;
 enum class RoofState { Open, Closed };
 
-RoofState g_roofState = RoofState::Closed;
+RoofState g_roofState = RoofState::Open;
 uint32_t g_lastServoCmdMs = 0;
 bool g_rainWasDetected = false;
 
 static constexpr uint8_t AUTO_CONFIRM_SAMPLES = 2;
 static constexpr uint32_t ROOF_MIN_COMMAND_INTERVAL_MS = 800;
-static constexpr uint32_t AUTO_PUMP_MIN_ON_MS = 30000;
+static constexpr uint32_t AUTO_PUMP_MIN_ON_MS = 5000;
 static constexpr uint32_t AUTO_PUMP_MIN_OFF_MS = 10000;
 static constexpr uint32_t AUTO_PUMP_SOIL_INVALID_HOLD_MS = 8000;
+static constexpr uint32_t BOOT_GUARD_MS = 2000; // 2 seconds stabilization
+uint32_t g_bootGuardUntilMs = 0;
 
 bool elapsedAtLeast(const uint32_t nowMs, const uint32_t sinceMs, const uint32_t durationMs) {
   const int32_t elapsedMs = static_cast<int32_t>(nowMs - sinceMs);
@@ -47,10 +57,16 @@ const __FlashStringHelper *roofStateText() {
 }
 
 void printRainState(const SensorData &data) {
-  Serial.print(F("RAIN_STATE do="));
-  Serial.print(rainDetected(data) ? F("WET") : F("DRY"));
-  Serial.print(F(" debounced="));
-  Serial.println(data.rain_ok ? 1 : 0);
+  Serial.print(F("RAIN_STATE state="));
+  if (!data.rain_ok) {
+    Serial.print(F("UNKNOWN"));
+  } else {
+    Serial.print(rainDetected(data) ? F("WET") : F("DRY"));
+  }
+  Serial.print(F(" valid="));
+  Serial.print(data.rain_ok ? 1 : 0);
+  Serial.print(F(" rainDO="));
+  Serial.println(data.rainDO);
 }
 
 void printRoofState() {
@@ -64,16 +80,18 @@ void printRoofState() {
 
 void printRoofCmd(const int target, const bool sent, const __FlashStringHelper *reason) {
   const bool opening = target == AUTO_ROOF_OPEN_ANGLE;
-  Serial.print(F("ROOF_CMD action="));
+  Serial.print(F("ROOF_CMD_DECISION reason="));
+  Serial.print(reason);
+  Serial.print(F(" action="));
   Serial.print(opening ? F("OPEN") : F("CLOSE"));
+  Serial.print(F(" target="));
+  Serial.print(target);
   Serial.print(F(" cmd="));
   Serial.print(opening ? 70 : 110);
   Serial.print(F(" dur_ms="));
   Serial.print(1800);
   Serial.print(F(" sent="));
   Serial.print(sent ? 1 : 0);
-  Serial.print(F(" reason="));
-  Serial.print(reason);
   Serial.print(F(" last_servo_cmd_ms="));
   Serial.print(g_lastServoCmdMs);
   Serial.print(F(" roof_motion_active="));
@@ -115,9 +133,10 @@ void resetAutoPumpRuntimeState() {
   g_pumpInvalidSinceMs = 0;
   g_pumpInvalidHoldLogged = false;
   g_pumpInvalidForceLogged = false;
-  g_autoPumpCommandedOn = false;
-  g_autoPumpSafetyLockout = false;
-  g_autoPumpSafetyLockoutLogged = false;
+  g_pumpState = PumpState::Idle;
+  g_pumpSafetyRetryCount = 0;
+  ActuatorManager::clearPumpSafetyTimeoutFlag();
+  ActuatorManager::resetPumpSafetyTimeoutCount();
 }
 
 bool sendRoofCommand(const int target, const uint32_t nowMs, const __FlashStringHelper *reason) {
@@ -150,12 +169,20 @@ void applyRainPolicy(const uint32_t nowMs, const SensorData &data) {
   printRainState(data);
   printRoofState();
 
-  if (!data.rain_ok || rainDetected(data)) {
-    const bool wet = rainDetected(data);
+  // Hold the roof while rain is not valid. Closing is allowed only for valid wet rain.
+  if (!data.rain_ok) {
+    if (nowMs < g_bootGuardUntilMs) {
+      return;
+    }
+    printRoofCmd(ActuatorManager::servoAngle(), false, F("rain_sensor_invalid_hold"));
+    return;
+  }
+
+  if (rainDetected(data)) {
     g_rainClearSinceMs = 0;
     g_rainWasDetected = true;
     ActuatorManager::setRoofOpenInterlock(true);
-    sendRoofCommand(AUTO_ROOF_SAFE_ANGLE, nowMs, wet ? F("rain_detected") : F("guard_block"));
+    sendRoofCommand(AUTO_ROOF_SAFE_ANGLE, nowMs, F("rain_detected"));
     return;
   }
 
@@ -175,6 +202,7 @@ void applyRainPolicy(const uint32_t nowMs, const SensorData &data) {
 }
 
 void applyPumpPolicy(const uint32_t nowMs, const SensorData &data) {
+  // --- Handle sensor invalid path (unchanged logic) ---
   if (!data.soil_ok) {
     g_pumpOnConfirm = 0;
     g_pumpOffConfirm = 0;
@@ -194,7 +222,9 @@ void applyPumpPolicy(const uint32_t nowMs, const SensorData &data) {
     const ActuatorCommandStatus status = ActuatorManager::requestPump(false, nowMs);
     if (status == ActuatorCommandStatus::Ok) {
       g_pumpLastOffMs = nowMs;
-      g_autoPumpCommandedOn = false;
+      if (g_pumpState == PumpState::Running) {
+        g_pumpState = PumpState::Idle;
+      }
     }
     if (oldState || status != ActuatorCommandStatus::Ok || !g_pumpInvalidForceLogged) {
       printPumpDecision(oldState, ActuatorManager::pumpOn(), data, F("SOIL_INVALID_FORCE_OFF"), status);
@@ -205,81 +235,130 @@ void applyPumpPolicy(const uint32_t nowMs, const SensorData &data) {
   g_pumpInvalidSinceMs = 0;
   g_pumpInvalidHoldLogged = false;
   g_pumpInvalidForceLogged = false;
-  const bool pumpOn = ActuatorManager::pumpOn();
-  if (g_autoPumpCommandedOn && !pumpOn && !g_autoPumpSafetyLockout) {
-    g_autoPumpSafetyLockout = true;
-    g_autoPumpSafetyLockoutLogged = false;
+
+  // --- Check for safety timeout from tickSafety() ---
+  if (ActuatorManager::pumpSafetyTimeoutFlag()) {
+    ActuatorManager::clearPumpSafetyTimeoutFlag();
     g_pumpLastOffMs = nowMs;
-  }
-  if (g_autoPumpSafetyLockout && !g_autoPumpSafetyLockoutLogged) {
-    printPumpDecision(true, false, data, F("SAFETY_OFF"), ActuatorCommandStatus::Ok);
-    g_autoPumpSafetyLockoutLogged = true;
-  }
-  if (!ActuatorManager::pumpOn()) {
+    ++g_pumpSafetyRetryCount;
+    if (g_pumpSafetyRetryCount >= PUMP_MAX_SAFETY_RETRIES) {
+      g_pumpState = PumpState::Locked;
+      printPumpDecision(true, false, data, F("SAFETY_LOCKED"), ActuatorCommandStatus::Ok);
+      Serial.print(F("PUMP_SM state=Locked retries="));
+      Serial.println(g_pumpSafetyRetryCount);
+    } else {
+      g_pumpState = PumpState::SafetyPause;
+      printPumpDecision(true, false, data, F("SAFETY_PAUSE"), ActuatorCommandStatus::Ok);
+      Serial.print(F("PUMP_SM state=SafetyPause retry="));
+      Serial.print(g_pumpSafetyRetryCount);
+      Serial.print(F("/"));
+      Serial.println(PUMP_MAX_SAFETY_RETRIES);
+    }
+    g_pumpOnConfirm = 0;
     g_pumpOffConfirm = 0;
-    if (data.soilPct < AUTO_SOIL_PUMP_ON_PCT && data.soilDO == 1) {
-      if (g_autoPumpSafetyLockout) {
+    return;
+  }
+
+  // --- Wet-soil reset: clear lockout/pause if soil is wet enough ---
+  if (data.soilPct > AUTO_SOIL_PUMP_OFF_PCT &&
+      (g_pumpState == PumpState::Locked || g_pumpState == PumpState::SafetyPause)) {
+    printPumpDecision(false, false, data, F("WET_RESET"), ActuatorCommandStatus::Ok);
+    g_pumpState = PumpState::Idle;
+    g_pumpSafetyRetryCount = 0;
+    g_pumpOnConfirm = 0;
+    g_pumpOffConfirm = 0;
+    return;
+  }
+
+  // --- State machine transitions ---
+  switch (g_pumpState) {
+    case PumpState::Locked: {
+      // Locked: do nothing until wet-soil reset (handled above)
+      g_pumpOnConfirm = 0;
+      return;
+    }
+
+    case PumpState::SafetyPause: {
+      // Wait for cooldown, then transition to Idle to allow retry
+      g_pumpOnConfirm = 0;
+      if (data.soilPct < AUTO_SOIL_PUMP_ON_PCT) {
+        const bool cooldownClear = g_pumpLastOffMs == 0 ||
+                                   elapsedAtLeast(nowMs, g_pumpLastOffMs, AUTO_PUMP_MIN_OFF_MS);
+        if (cooldownClear) {
+          g_pumpState = PumpState::Idle;
+          Serial.println(F("PUMP_SM SafetyPause->Idle cooldown_clear"));
+        }
+      }
+      return;
+    }
+
+    case PumpState::Idle: {
+      // Pump is OFF, check if soil is dry enough to turn ON
+      g_pumpOffConfirm = 0;
+      if (data.soilPct < AUTO_SOIL_PUMP_ON_PCT) {
+        ++g_pumpOnConfirm;
+        Serial.print(F("AUTO_PUMP_CONFIRM reason=soil_dry pct="));
+        Serial.print(data.soilPct, 1);
+        Serial.print(F(" count="));
+        Serial.println(g_pumpOnConfirm);
+        if (g_pumpOnConfirm >= AUTO_CONFIRM_SAMPLES) {
+          const bool offGuardClear = g_pumpLastOffMs == 0 ||
+                                     elapsedAtLeast(nowMs, g_pumpLastOffMs, AUTO_PUMP_MIN_OFF_MS);
+          const bool oldState = ActuatorManager::pumpOn();
+          const ActuatorCommandStatus status = offGuardClear
+                                                 ? ActuatorManager::requestPump(true, nowMs)
+                                                 : ActuatorCommandStatus::CooldownActive;
+          if (status == ActuatorCommandStatus::Ok) {
+            g_pumpLastOnMs = nowMs;
+            g_pumpState = PumpState::Running;
+          }
+          printPumpDecision(oldState, ActuatorManager::pumpOn(), data,
+                            offGuardClear ? F("SOIL_DRY_ON") : F("MIN_OFF_HOLD"), status);
+          g_pumpOnConfirm = 0;
+        }
+      } else {
         g_pumpOnConfirm = 0;
+      }
+      return;
+    }
+
+    case PumpState::Running: {
+      // Pump is ON, check if soil is wet enough to turn OFF
+      g_pumpOnConfirm = 0;
+      if (!ActuatorManager::pumpOn()) {
+        // External kill (shouldn't happen if safety flag handled above)
+        g_pumpState = PumpState::Idle;
+        g_pumpLastOffMs = nowMs;
+        printPumpDecision(true, false, data, F("EXTERNAL_OFF"), ActuatorCommandStatus::Ok);
         return;
       }
-      ++g_pumpOnConfirm;
-      Serial.print(F("AUTO_PUMP_CONFIRM reason=soil_dry pct="));
-      Serial.print(data.soilPct, 1);
-      Serial.print(F(" count="));
-      Serial.println(g_pumpOnConfirm);
-      if (g_pumpOnConfirm >= AUTO_CONFIRM_SAMPLES) {
-        const bool offGuardClear = g_pumpLastOffMs == 0 || elapsedAtLeast(nowMs, g_pumpLastOffMs, AUTO_PUMP_MIN_OFF_MS);
-        const bool oldState = ActuatorManager::pumpOn();
-        const ActuatorCommandStatus status = offGuardClear ? ActuatorManager::requestPump(true, nowMs)
-                                                           : ActuatorCommandStatus::CooldownActive;
-        if (status == ActuatorCommandStatus::Ok) {
-          g_pumpLastOnMs = nowMs;
-          g_autoPumpCommandedOn = true;
-          g_autoPumpSafetyLockout = false;
-          g_autoPumpSafetyLockoutLogged = false;
+      if (data.soilPct > AUTO_SOIL_PUMP_OFF_PCT) {
+        ++g_pumpOffConfirm;
+        Serial.print(F("AUTO_PUMP_CONFIRM reason=soil_wet pct="));
+        Serial.print(data.soilPct, 1);
+        Serial.print(F(" count="));
+        Serial.println(g_pumpOffConfirm);
+        if (g_pumpOffConfirm >= AUTO_CONFIRM_SAMPLES) {
+          const bool onGuardClear = g_pumpLastOnMs == 0 ||
+                                    elapsedAtLeast(nowMs, g_pumpLastOnMs, AUTO_PUMP_MIN_ON_MS);
+          const bool oldState = ActuatorManager::pumpOn();
+          const ActuatorCommandStatus status = onGuardClear
+                                                 ? ActuatorManager::requestPump(false, nowMs)
+                                                 : ActuatorCommandStatus::CooldownActive;
+          if (status == ActuatorCommandStatus::Ok) {
+            g_pumpLastOffMs = nowMs;
+            g_pumpState = PumpState::Idle;
+            g_pumpSafetyRetryCount = 0;
+          }
+          printPumpDecision(oldState, ActuatorManager::pumpOn(), data,
+                            onGuardClear ? F("SOIL_WET_OFF") : F("MIN_ON_HOLD"), status);
+          g_pumpOffConfirm = 0;
         }
-        printPumpDecision(oldState, ActuatorManager::pumpOn(), data,
-                          offGuardClear ? F("SOIL_DRY_ON") : F("MIN_OFF_HOLD"), status);
-        g_pumpOnConfirm = 0;
-      }
-    } else {
-      g_pumpOnConfirm = 0;
-    }
-  } else {
-    g_pumpOnConfirm = 0;
-    if (data.soilPct > AUTO_SOIL_PUMP_OFF_PCT) {
-      ++g_pumpOffConfirm;
-      Serial.print(F("AUTO_PUMP_CONFIRM reason=soil_wet pct="));
-      Serial.print(data.soilPct, 1);
-      Serial.print(F(" count="));
-      Serial.println(g_pumpOffConfirm);
-      if (g_pumpOffConfirm >= AUTO_CONFIRM_SAMPLES) {
-        const bool onGuardClear = g_pumpLastOnMs == 0 || elapsedAtLeast(nowMs, g_pumpLastOnMs, AUTO_PUMP_MIN_ON_MS);
-        const bool oldState = ActuatorManager::pumpOn();
-        const ActuatorCommandStatus status = onGuardClear ? ActuatorManager::requestPump(false, nowMs)
-                                                          : ActuatorCommandStatus::CooldownActive;
-        if (status == ActuatorCommandStatus::Ok) {
-          g_pumpLastOffMs = nowMs;
-          g_autoPumpCommandedOn = false;
-          g_autoPumpSafetyLockout = false;
-          g_autoPumpSafetyLockoutLogged = false;
-        }
-        printPumpDecision(oldState, ActuatorManager::pumpOn(), data,
-                          onGuardClear ? F("SOIL_WET_OFF") : F("MIN_ON_HOLD"), status);
+      } else {
         g_pumpOffConfirm = 0;
       }
-    } else {
-      g_pumpOffConfirm = 0;
+      return;
     }
-  }
-  if (!ActuatorManager::pumpOn() && data.soilPct > AUTO_SOIL_PUMP_OFF_PCT &&
-      (g_autoPumpCommandedOn || g_autoPumpSafetyLockout)) {
-    g_autoPumpCommandedOn = false;
-    g_autoPumpSafetyLockout = false;
-    g_autoPumpSafetyLockoutLogged = false;
-    g_pumpOnConfirm = 0;
-    g_pumpOffConfirm = 0;
-    printPumpDecision(false, false, data, F("SOIL_WET_OFF"), ActuatorCommandStatus::Ok);
   }
 }
 
@@ -369,6 +448,7 @@ void begin(const uint32_t nowMs) {
   g_lastAutoPumpOwnerMode = ModeController::mode();
   g_lightOnConfirm = 0;
   g_lightOffConfirm = 0;
+  g_bootGuardUntilMs = nowMs + BOOT_GUARD_MS;
 }
 
 void tick(const uint32_t nowMs, const SensorData &data) {
@@ -412,6 +492,7 @@ bool runSelfTest() {
   ActuatorManager::restoreSafeDefaults();
   ModeController::setAuto("auto_logic_test", 1000);
 
+  // --- T01: Dry soil turns pump ON ---
   begin(1000);
   g_roofState = RoofState::Open;
   ActuatorManager::requestServoAngleCommand(AUTO_ROOF_OPEN_ANGLE, 1000);
@@ -423,12 +504,14 @@ bool runSelfTest() {
   pass &= ActuatorManager::lightOn();
   pass &= ActuatorManager::pumpOn();
 
+  // --- T02: Wet soil turns pump OFF ---
   tick(34000, makeSample(23.0f, 7.0f, 80.0f, 1));
   tick(36000, makeSample(23.0f, 7.0f, 80.0f, 1));
   pass &= !ActuatorManager::fanOn();
   pass &= !ActuatorManager::lightOn();
   pass &= !ActuatorManager::pumpOn();
 
+  // --- T05: Sensor invalid ---
   SensorData invalid = makeSample(30.0f, 1000.0f, 20.0f, 1);
   invalid.dht_ok = false;
   invalid.bh1750_ok = false;
@@ -438,17 +521,87 @@ bool runSelfTest() {
   pass &= !ActuatorManager::lightOn();
   pass &= !ActuatorManager::pumpOn();
 
-  tick(40000, makeSample(25.0f, 7.0f, 60.0f, 0));
-  pass &= ActuatorManager::servoAngle() == AUTO_ROOF_SAFE_ANGLE;
-  ActuatorManager::updateServoSweep(42000);
-  tick(42000, makeSample(25.0f, 7.0f, 60.0f, 1));
-  tick(42000 + RAIN_CLEAR_REOPEN_DELAY_MS + 1, makeSample(25.0f, 7.0f, 60.0f, 1));
+  // --- T06: Boot rain invalid/dry must not close an open roof ---
+  ActuatorManager::restoreSafeDefaults();
+  ActuatorManager::requestServoAngleCommand(AUTO_ROOF_OPEN_ANGLE, 39000);
+  begin(39000);
+  SensorData invalidRain = makeSample(25.0f, 1000.0f, 60.0f, 0);
+  invalidRain.rain_ok = false;
+  tick(39000, invalidRain);
   pass &= ActuatorManager::servoAngle() == AUTO_ROOF_OPEN_ANGLE;
+  tick(41000, makeSample(25.0f, 1000.0f, 60.0f, 1));
+  pass &= ActuatorManager::servoAngle() == AUTO_ROOF_OPEN_ANGLE;
+  tick(43000, makeSample(25.0f, 1000.0f, 60.0f, 0));
+  pass &= ActuatorManager::servoAngle() == AUTO_ROOF_SAFE_ANGLE;
+  Serial.println(F("T06_BOOT_RAIN_GUARD: invalid/dry holds open, valid wet closes"));
+
+  // --- Rain roof test (unchanged) ---
+  tick(45000, makeSample(25.0f, 7.0f, 60.0f, 0));
+  pass &= ActuatorManager::servoAngle() == AUTO_ROOF_SAFE_ANGLE;
+  ActuatorManager::updateServoSweep(47000);
+  tick(47000, makeSample(25.0f, 7.0f, 60.0f, 1));
+  tick(47000 + RAIN_CLEAR_REOPEN_DELAY_MS + 1, makeSample(25.0f, 7.0f, 60.0f, 1));
+  pass &= ActuatorManager::servoAngle() == AUTO_ROOF_OPEN_ANGLE;
+
+  // --- T03: Safety timeout → pump re-engages (THE BUG FIX TEST) ---
+  ActuatorManager::restoreSafeDefaults();
+  begin(100000);
+  // Pump ON with dry soil (confirm at t=100000, ON at t=102000)
+  tick(100000, makeSample(29.0f, 500.0f, 10.0f, 1));
+  tick(102000, makeSample(29.0f, 500.0f, 10.0f, 1));
+  pass &= ActuatorManager::pumpOn();
+  Serial.println(F("T03_PUMP_ON_CHECK: pump should be ON"));
+
+  // Simulate safety timeout: pump ON since t=102000, timeout at 102000+60001
+  ActuatorManager::tickSafety(102000 + 60001);
+  pass &= !ActuatorManager::pumpOn();
+  pass &= ActuatorManager::pumpSafetyTimeoutFlag();
+  Serial.println(F("T03_SAFETY_TIMEOUT: pump killed by tickSafety"));
+
+  // Next auto tick detects flag → SafetyPause, sets pumpLastOffMs=163000
+  tick(163000, makeSample(29.0f, 500.0f, 10.0f, 1));
+  pass &= !ActuatorManager::pumpOn();
+  pass &= (g_pumpState == PumpState::SafetyPause);
+  Serial.println(F("T03_SAFETY_PAUSE: pump in SafetyPause state"));
+
+  // After cooldown (10s from t=163000) → Idle
+  tick(174000, makeSample(29.0f, 500.0f, 10.0f, 1));
+  pass &= (g_pumpState == PumpState::Idle);
+  Serial.println(F("T03_COOLDOWN_CLEAR: pump back to Idle"));
+
+  // Pump re-engages: confirm at t=175000, ON at t=177000
+  tick(175000, makeSample(29.0f, 500.0f, 10.0f, 1));
+  tick(177000, makeSample(29.0f, 500.0f, 10.0f, 1));
+  pass &= ActuatorManager::pumpOn();
+  Serial.println(F("T03_RE_ENGAGE: pump ON again after safety timeout"));
+
+  // --- T04: Max retries → Locked ---
+  // 2nd safety timeout: pump ON since t=177000
+  ActuatorManager::tickSafety(177000 + 60001);
+  tick(238000, makeSample(29.0f, 500.0f, 10.0f, 1));
+  pass &= (g_pumpState == PumpState::SafetyPause);
+
+  // Cooldown (10s from t=238000) + re-engage
+  tick(249000, makeSample(29.0f, 500.0f, 10.0f, 1));
+  tick(250000, makeSample(29.0f, 500.0f, 10.0f, 1));
+  tick(252000, makeSample(29.0f, 500.0f, 10.0f, 1));
+  pass &= ActuatorManager::pumpOn();
+
+  // 3rd safety timeout → Locked: pump ON since t=252000
+  ActuatorManager::tickSafety(252000 + 60001);
+  tick(313000, makeSample(29.0f, 500.0f, 10.0f, 1));
+  pass &= (g_pumpState == PumpState::Locked);
+  pass &= !ActuatorManager::pumpOn();
+  Serial.println(F("T04_LOCKED: pump locked after max retries"));
+
+  // Wet soil resets lockout
+  tick(315000, makeSample(29.0f, 500.0f, 60.0f, 1));
+  pass &= (g_pumpState == PumpState::Idle);
+  Serial.println(F("T04_WET_RESET: pump unlocked by wet soil"));
 
   ActuatorManager::restoreSafeDefaults();
   begin(millis());
   ActuatorManager::setSelfTestMode(false);
-  ModeController::begin(millis());
 
   Serial.print(F("AUTO_LOGIC_SELF_TEST: "));
   Serial.println(pass ? F("PASS") : F("FAIL"));

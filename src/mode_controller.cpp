@@ -35,7 +35,7 @@ bool transitionAllowed(const SystemMode from, const SystemMode to) {
     return false;
   }
   if (from == SystemMode::Boot) {
-    return to == SystemMode::Auto || to == SystemMode::Error;
+    return to == SystemMode::Auto || to == SystemMode::Manual || to == SystemMode::Error;
   }
   if (from == SystemMode::SafeStop) {
     return to == SystemMode::Auto || to == SystemMode::Error;
@@ -171,8 +171,9 @@ bool runSelfTest() {
   const char *rejectReason = nullptr;
 
   begin(1000);
-  pass &= !setManual("boot_reject", 1000);
   pass &= !actuatorCommandAllowed(&rejectReason) && strcmp(rejectReason, "system_not_ready") == 0;
+  pass &= setManual("boot_accept", 1005);
+  begin(1010);
   pass &= setAuto("self_test_pass", 1100);
   pass &= !actuatorCommandAllowed(&rejectReason) && strcmp(rejectReason, "invalid_mode") == 0;
   pass &= setManual("test_manual", 1200);

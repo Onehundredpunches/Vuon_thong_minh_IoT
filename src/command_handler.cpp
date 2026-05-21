@@ -33,6 +33,8 @@ enum class CommandKind : uint8_t {
 
 struct ParsedCommand {
   CommandKind kind;
+  // Compatibility field: for roof commands this stores the logical roof state
+  // marker (AUTO_ROOF_OPEN_ANGLE/AUTO_ROOF_SAFE_ANGLE), not a physical angle.
   int servoAngle;
 };
 
@@ -78,6 +80,8 @@ ParsedCommand parseCommand(const char *cmd) {
   }
 
   int targetAngle = -1;
+  // Keep existing "servo 0/1" command compatibility; these values are logical
+  // open/closed state markers for the continuous-rotation roof servo.
   if (sscanf(cmd, "servo %d", &targetAngle) == 1 &&
       (targetAngle == AUTO_ROOF_OPEN_ANGLE || targetAngle == AUTO_ROOF_SAFE_ANGLE)) {
     return {CommandKind::ServoAngle, targetAngle};
@@ -467,10 +471,12 @@ ExecuteResult executeStructured(const char *cmd, const bool bypassModeGate, cons
 
 bool runParserSelfTest() {
   bool pass = true;
+  char closeCommand[16] = {0};
+  snprintf(closeCommand, sizeof(closeCommand), "servo %d", AUTO_ROOF_SAFE_ANGLE);
   pass &= expectKind("  LIGHT   ON  ", CommandKind::LightOn);
   pass &= expectKind("Fan\tOff", CommandKind::FanOff);
   pass &= expectKind("pump on", CommandKind::PumpOn);
-  pass &= expectKind("servo 90", CommandKind::ServoAngle, 90);
+  pass &= expectKind(closeCommand, CommandKind::ServoAngle, AUTO_ROOF_SAFE_ANGLE);
   pass &= expectKind("servo stop", CommandKind::ServoSweepOff);
   pass &= expectKind("mode manual", CommandKind::SetModeManual);
   pass &= expectKind("set_mode auto", CommandKind::SetModeAuto);

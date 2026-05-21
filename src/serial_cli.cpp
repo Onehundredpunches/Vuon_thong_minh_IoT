@@ -3,6 +3,7 @@
 #include <ctype.h>
 #include <string.h>
 
+#include "config.h"
 #include "log_config.h"
 
 namespace SerialCLI {
@@ -146,7 +147,8 @@ void printHelp() {
   Serial.println(F("  servo sweep off"));
   Serial.println(F("  servo stop"));
   Serial.println(F("  servo 0"));
-  Serial.println(F("  servo 90"));
+  Serial.print(F("  servo "));
+  Serial.println(AUTO_ROOF_SAFE_ANGLE);
   Serial.println(F("  light on"));
   Serial.println(F("  light off"));
   Serial.println(F("  light toggle"));

@@ -11,7 +11,7 @@ void begin();
 void setSelfTestMode(bool enabled);
 void printRelayActiveLevel();
 
-void initServoControl();
+void initServoControl(int initialAngle);
 void updateServoSweep(uint32_t nowMs);
 void updateLightBlink(uint32_t nowMs);
 void completeLightBlinkForTest();
@@ -54,6 +54,11 @@ bool servoSweepEnabled();
 int servoAngle();
 bool servoDetachedOrSelfTest();
 bool runSafetySelfTest();
+
+bool pumpSafetyTimeoutFlag();
+void clearPumpSafetyTimeoutFlag();
+uint8_t pumpSafetyTimeoutCount();
+void resetPumpSafetyTimeoutCount();
 
 ActuatorSnapshot snapshot();
 

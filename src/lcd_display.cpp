@@ -97,6 +97,10 @@ void buildPage2Line2(const LcdDisplayState &state, char *out) {
   const char *roof = (state.actuators.servoAngle == AUTO_ROOF_OPEN_ANGLE) ? "O" : "C";
   const char *rain = (state.sensors.rain_ok && state.sensors.rainDO == 0) ? "WET" : "DRY";
   const char *owner = (strcmp(state.controlOwner, "AUTO") == 0 || strcmp(state.controlOwner, "AU") == 0) ? "AU" : "BE";
+  Serial.print(F("LCD_K_STATE_SOURCE source=actuator_snapshot servoAngle="));
+  Serial.print(state.actuators.servoAngle);
+  Serial.print(F(" k="));
+  Serial.println(roof);
   snprintf(raw, sizeof(raw), "K:%s R:%s C:%s", roof, rain, owner);
   format16(raw, out);
 }
